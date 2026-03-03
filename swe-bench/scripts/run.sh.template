@@ -1,0 +1,39 @@
+#!/bin/bash
+# Run SWE-bench Verified with local endpoint
+# Usage:
+#   ./run.sh                          # thinking mode (default)
+#   ./run.sh --no-think               # instant mode (no thinking)
+#   ./run.sh --slice 0:5              # first 5 instances
+#   ./run.sh --filter '^(django__django-11099)$'  # single instance
+#   ./run.sh --workers 4              # parallel workers
+#   ./run.sh --no-think --workers 4   # combine flags
+
+set -euo pipefail
+cd "$(dirname "$0")"
+
+export PATH="/root/.local/bin:$PATH"
+source .venv/bin/activate
+export LITELLM_MODEL_REGISTRY_PATH="$(pwd)/registry.json"
+
+# Default: thinking mode
+THINK_CONFIG="sglang_swebench_thinking.yaml"
+OUTPUT_PREFIX="think"
+
+# Parse --no-think flag
+EXTRA_ARGS=()
+for arg in "$@"; do
+  if [ "$arg" = "--no-think" ]; then
+    THINK_CONFIG="sglang_swebench_nothinking.yaml"
+    OUTPUT_PREFIX="non-think"
+  else
+    EXTRA_ARGS+=("$arg")
+  fi
+done
+
+mini-extra swebench \
+  --config sglang_swebench.yaml \
+  --config "$THINK_CONFIG" \
+  --output "results/${OUTPUT_PREFIX}/" \
+  --subset verified \
+  --split test \
+  "${EXTRA_ARGS[@]}"

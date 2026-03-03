@@ -1,0 +1,39 @@
+#!/bin/bash
+# Evaluate SWE-bench predictions
+# Usage:
+#   ./eval.sh think          # evaluate thinking mode results
+#   ./eval.sh non-think      # evaluate non-thinking mode results
+
+set -euo pipefail
+cd "$(dirname "$0")"
+
+export PATH="/root/.local/bin:$PATH"
+source .venv/bin/activate
+
+MODE="${1:?Usage: ./eval.sh <think|non-think>}"
+PREDS="results/${MODE}/preds.json"
+RUN_ID="${MODE}_{{MODEL_SLUG}}"
+
+if [ ! -f "$PREDS" ]; then
+  echo "Error: $PREDS not found"
+  exit 1
+fi
+
+# Convert preds.json (dict) to preds.jsonl (one JSON object per line)
+python3 -c "
+import json
+data = json.load(open('${PREDS}'))
+preds = list(data.values())
+with open('results/${MODE}/preds.jsonl', 'w') as f:
+    for p in preds:
+        f.write(json.dumps(p) + '\n')
+print(f'Loaded {len(preds)} predictions')
+"
+
+python3 -m swebench.harness.run_evaluation \
+  -d princeton-nlp/SWE-bench_Verified \
+  -s test \
+  -p "results/${MODE}/preds.jsonl" \
+  -id "$RUN_ID" \
+  --max_workers 5 \
+  --report_dir "results/${MODE}/"
