@@ -1,0 +1,7 @@
+{
+  "name": "openclaw-interact",
+  "description": "Interact with OpenClaw — send messages and talk to the OpenClaw agent via CLI",
+  "author": {
+    "name": "Xinyuan"
+  }
+}
