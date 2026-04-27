@@ -1,8 +1,16 @@
 #!/bin/bash
 # Evaluate SWE-bench predictions
 # Usage:
-#   ./eval.sh think          # evaluate thinking mode results
-#   ./eval.sh non-think      # evaluate non-thinking mode results
+#   ./eval.sh think                 # evaluate thinking mode (max_workers=16)
+#   ./eval.sh non-think             # evaluate non-thinking mode (max_workers=16)
+#   ./eval.sh think 32              # bump max_workers (recommended on 64+ cores)
+#   ./eval.sh non-think 8           # ratchet down on small hosts
+#
+# Recommended max_workers by host size:
+#   16-core:           5-8     (~120 min for 500 instances)
+#   64-core:           16      (~40 min)
+#   192-core:          32      (~20 min)
+# Going higher than 32 is rarely worth it — Docker daemon becomes the bottleneck.
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -10,7 +18,8 @@ cd "$(dirname "$0")"
 export PATH="/root/.local/bin:$PATH"
 source .venv/bin/activate
 
-MODE="${1:?Usage: ./eval.sh <think|non-think>}"
+MODE="${1:?Usage: ./eval.sh <think|non-think> [max_workers]}"
+MAX_WORKERS="${2:-16}"
 PREDS="results/${MODE}/preds.json"
 RUN_ID="${MODE}_{{MODEL_SLUG}}"
 
@@ -30,10 +39,11 @@ with open('results/${MODE}/preds.jsonl', 'w') as f:
 print(f'Loaded {len(preds)} predictions')
 "
 
+echo "[eval] running with max_workers=${MAX_WORKERS}"
 python3 -m swebench.harness.run_evaluation \
   -d princeton-nlp/SWE-bench_Verified \
   -s test \
   -p "results/${MODE}/preds.jsonl" \
   -id "$RUN_ID" \
-  --max_workers 5 \
+  --max_workers "$MAX_WORKERS" \
   --report_dir "results/${MODE}/"

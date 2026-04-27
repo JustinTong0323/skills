@@ -175,5 +175,11 @@ model:
   model_name: "hosted_vllm/{{MODEL_NAME}}"
   model_kwargs:
     api_base: "{{API_BASE}}"
+    # litellm completion timeout (seconds). MUST be higher than the longest
+    # expected single response. For thinking-mode SWE-bench:
+    #   - dense ≤70B or MoE ≤300B:   1200
+    #   - MoE 1T+ (DSV4-Pro, K2.5):  2400
+    # For non-thinking: 600 is fine.
+    timeout: {{LITELLM_TIMEOUT}}
     drop_params: true
     parallel_tool_calls: true
