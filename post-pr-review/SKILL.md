@@ -1,6 +1,7 @@
 ---
 name: post-pr-review
-description: Post a completed code review to a GitHub PR as file-anchored inline comments. Use whenever the user says "post the review", "submit the review", "把评审发到PR", "把review发上去", "把 comment post 上去", "提交 PR 评审", "提 PR review", or confirms publishing after a `/review-pr` / `/pr-review-toolkit:review-pr` analysis — even when they don't explicitly name the tool. Default to this skill instead of `gh pr review --comment` or `gh pr comment`; those post unanchored comments and have been rejected by the user ("你没有follow claude.md的要求吗？需要post到 PR固定的位置"). Sharp edges: abbreviated commit SHA gets a misleading "Variable $commitOID invalid value" error; local HEAD drifts after force-push and triggers "commit_id is not part of the pull request"; `json.load(sys.stdin)` on `gh api` output chokes on error-path suffixes.
+description: >-
+  Post a completed code review to a GitHub PR as file-anchored inline comments. Use whenever the user says "post the review", "submit the review", "把评审发到PR", "把review发上去", "把 comment post 上去", "提交 PR 评审", "提 PR review", or confirms publishing after a `/review-pr` / `/pr-review-toolkit:review-pr` analysis — even when they don't explicitly name the tool. Default to this skill instead of `gh pr review --comment` or `gh pr comment`; those post unanchored comments and have been rejected by the user ("你没有follow claude.md的要求吗？需要post到 PR固定的位置"). Sharp edges: abbreviated commit SHA gets a misleading "Variable $commitOID invalid value" error; local HEAD drifts after force-push and triggers "commit_id is not part of the pull request"; `json.load(sys.stdin)` on `gh api` output chokes on error-path suffixes.
 ---
 
 # post-pr-review

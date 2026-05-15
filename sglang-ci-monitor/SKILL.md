@@ -1,6 +1,7 @@
 ---
 name: sglang-ci-monitor
-description: Check, diagnose, rerun, and wait on CI for a sglang PR. Use whenever the user asks about CI on a sglang PR, wants to monitor a run, diagnose a CI failure, rerun failed jobs, or wait for CI to finish — even when they phrase it as "is the PR green?", "what's happening with the tests?", "something failed, look at it", or "babysit this PR for me". Assumes the user is a sglang CI maintainer, so all slash commands are available. Sharp edges: fast-fail cascades that hide the real root, `/rerun-failed-ci` vs `/tag-and-rerun-ci` vs `/rerun-stage` doing subtly different things, issue_comment-based reruns invisible on the PR page, exit-255 ambiguity — this skill is the default playbook.
+description: >-
+  Check, diagnose, rerun, and wait on CI for a sglang PR. Use whenever the user asks about CI on a sglang PR, wants to monitor a run, diagnose a CI failure, rerun failed jobs, or wait for CI to finish — even when they phrase it as "is the PR green?", "what's happening with the tests?", "something failed, look at it", or "babysit this PR for me". Assumes the user is a sglang CI maintainer, so all slash commands are available. Sharp edges: fast-fail cascades that hide the real root, `/rerun-failed-ci` vs `/tag-and-rerun-ci` vs `/rerun-stage` doing subtly different things, issue_comment-based reruns invisible on the PR page, exit-255 ambiguity — this skill is the default playbook.
 ---
 
 # sglang CI monitor
