@@ -64,14 +64,14 @@ gh pr view <PR> --repo sgl-project/sglang --json statusCheckRollup,labels,body \
 
 ### Fast `<RUN_ID>` shortcut — read the PR States block
 
-`pr-states.yml` maintains a CI States block at the bottom of every PR body, between `<!-- pr-states:start -->` and `<!-- pr-states:end -->`. It shows the **latest** run links for both `pr-test.yml` (base CI) and `pr-test-extra.yml` (extra CI), refreshed on `synchronize`, `labeled`, `unlabeled`, and pr-test* workflow_run events (so slash-command-initiated reruns refresh it too). This is usually the cheapest way to grab `<RUN_ID>`:
+`pr-states.yml` maintains a CI States block at the bottom of every PR body, between `<!-- pr-states:start -->` and `<!-- pr-states:end -->`. It shows run links for both `pr-test.yml` (base CI) and `pr-test-extra.yml` (extra CI) when the block is current. This is usually the cheapest way to grab an initial `<RUN_ID>`, but treat it as a shortcut, not the final source of truth after slash-command reruns — workflow-run refresh wiring can lag or drift from workflow names.
 
 ```bash
 gh pr view <PR> --repo sgl-project/sglang --json body \
   --jq '.body' | sed -n '/<!-- pr-states:start -->/,/<!-- pr-states:end -->/p'
 ```
 
-You'll see something like `Latest PR Test (Base): [Run #12345678](https://github.com/.../actions/runs/12345678)` and a matching `(Extra):` line — or `:x: Missing 'run-ci' label` / `:warning: Not enabled — add 'run-ci-extra' label to opt in` when a workflow is gated off. Reach for `gh run list --workflow=pr-test.yml --branch <head> --limit 1 --repo sgl-project/sglang` only when the block is missing (very old PRs) or when you need a non-latest run.
+You'll see something like `Latest PR Test (Base): [Run #12345678](https://github.com/.../actions/runs/12345678)` and a matching `(Extra):` line — or `:x: Missing 'run-ci' label` / `:warning: Not enabled — add 'run-ci-extra' label to opt in` when a workflow is gated off. Reach for `gh run list --workflow=pr-test.yml --branch <head> --limit 1 --repo sgl-project/sglang` when the block is missing, after a slash-command rerun, when the link looks stale, or when you need a non-latest run.
 
 ### Always separate real failures from fast-fail victims
 
@@ -191,11 +191,11 @@ Only the first line of the comment is parsed. Handler: `scripts/ci/utils/slash_c
 
 | Command | What it actually does |
 |---|---|
-| `/rerun-failed-ci` | For every run on the head SHA with conclusion `failure` or `skipped`: if the PR touches `sgl-kernel/` **and** not all `Build Wheel*` check-runs are green (CUDA + ARM), call `run.rerun()` (full rerun); otherwise `run.rerun_failed_jobs()` (failed jobs + their dependents). Iterates across **every** workflow on the head SHA (pr-test, pr-test-extra, pr-test-sgl-kernel, jit-kernel, multimodal-gen…) so sibling-workflow failures are covered. Cancelled / fast-fail-victim runs count as `failure`. |
+| `/rerun-failed-ci` | For every **completed** run on the head SHA with conclusion `failure` or `skipped`: if the PR touches `sgl-kernel/` **and** not all `Build Wheel*` check-runs are green (CUDA + ARM), call `run.rerun()` (full rerun); otherwise `run.rerun_failed_jobs()` (failed jobs + their dependents). Iterates across **every** workflow on the head SHA (pr-test, pr-test-extra, pr-test-sgl-kernel, jit-kernel, multimodal-gen…) so sibling-workflow failures are covered. Fast-fail-victim jobs conclude `failure` and are covered; cancelled workflow runs are ignored by the handler. |
 | `/tag-and-rerun-ci` | `/tag-run-ci-label` + sleep 5s + `/rerun-failed-ci`. Use when the PR is missing `run-ci` and also has reds to retry in one shot. |
 | `/tag-run-ci-label` | Adds the `run-ci` label. Nothing else. |
-| `/rerun-test <file>...` | `workflow_dispatch` on the separate **`Rerun Test`** workflow (`rerun-test.yml`). Resolves each file by looking up its `register_cuda_ci(stage=, runner_config=)` (or `register_cpu_ci(...)`) decorator and dispatches one run per test on the appropriate runner. Investigation tool — runs the listed tests independently of pr-test.yml. Does NOT update PR checks; the original red stays red. Blocked entirely on fork PRs. |
-| `/rerun-group <group>...` | Expands each group name to all `test_*.py` files under `test/registered/<group>/` and reuses `/rerun-test` dispatch. Use when you know which module is flaky (e.g. `hicache`, `core`, `dsv4`) but don't want to enumerate files yourself. Same permissions and fork-block as `/rerun-test`. |
+| `/rerun-test <file>...` | `workflow_dispatch` on the separate **`Rerun Test`** workflow (`rerun-test.yml`). Resolves each file by looking up its `register_cuda_ci(stage=, runner_config=)` (or `register_cpu_ci(...)`) decorator and dispatches one run per test on the appropriate runner. Investigation tool — runs the listed tests independently of pr-test.yml. Does NOT update PR checks; the original red stays red. Fork PRs are allowed only when the commenter has write/admin permission; untrusted fork authors are blocked. |
+| `/rerun-group <group>...` | Expands each group name to all `test_*.py` files under `test/registered/<group>/` and reuses `/rerun-test` dispatch. Use when you know which module is flaky (e.g. `hicache`, `core`, `dsv4`) but don't want to enumerate files yourself. Same fork permission rule as `/rerun-test`: write/admin commenters can run it on fork PRs; untrusted fork authors cannot. |
 | `/rerun-stage` | **DEPRECATED** (PR #25322). The handler now replies with a `-1` reaction and a comment pointing to alternatives, and does nothing. Don't post it. |
 
 **Label-level controls** (use `gh pr edit <PR> --repo sgl-project/sglang --add-label <name>` to apply):
@@ -217,35 +217,37 @@ Stage-level retry (the deprecated `/rerun-stage`) is no longer an option — the
 
 ### Issue it
 
-If there's an active run on the PR **and** you're about to rerun because it's doomed (flaky root with pending cascade, or in-flight reds you want to replace), cancel first:
+If the run is already terminal, post the slash command directly:
 
 ```bash
-gh run cancel <RUN_ID> --repo sgl-project/sglang
-```
-
-Cancellation is **not** needed when the run is already terminal — `/rerun-failed-ci` picks up `failure`/`skipped` conclusions directly. Then post the comment:
-
-```bash
-gh pr comment <PR> --repo sgl-project/sglang --body "/tag-and-rerun-ci"
-```
-
-### Flaky root + in-flight cascade: cancel, don't wait
-
-If the real failure is a known-flaky test (transient, matches a known flake pattern, or an infra wobble) **and** the run still has pending jobs that will fast-fail from the cascade, cancel the in-flight run immediately and rerun — waiting out the queue gives zero signal:
-
-```bash
-gh run cancel <RUN_ID> --repo sgl-project/sglang
 gh pr comment <PR> --repo sgl-project/sglang --body "/rerun-failed-ci"
 ```
 
-Cancelled jobs count as failure for `/rerun-failed-ci`, so this retries the root + all cascade victims + anything that was pending, while preserving already-green jobs. That's the right shape for "rerun everything that isn't already passing."
+If the run is still active, `/rerun-failed-ci` cannot pick it up yet because the handler only scans completed `failure` / `skipped` workflow runs. Do **not** cancel an active run and then post `/rerun-failed-ci`: cancelled workflow runs are ignored by the handler, so the comment can no-op.
+
+When an active run is doomed, choose one of these:
+
+- Normal path: leave the run alone, poll to terminal, then post `/rerun-failed-ci`.
+- Urgent infra-budget path: cancel the active run, wait for the cancellation to land, then rerun that same workflow run explicitly with `gh run rerun <RUN_ID>`. This is the exception to the slash-command preference; it skips the handler's multi-workflow / kernel-wheel logic, so use it only when you intentionally want to replace that exact active run.
+
+### Flaky root + in-flight cascade: don't use `/rerun-failed-ci` until terminal
+
+If the real failure is a known-flaky test (transient, matches a known flake pattern, or an infra wobble) **and** the run still has pending jobs that will fast-fail from the cascade, waiting out the queue gives little signal, but the slash-command handler still won't see the run until it is terminal. Either wait/poll until terminal and then post `/rerun-failed-ci`, or use the urgent path above:
+
+```bash
+gh run cancel <RUN_ID> --repo sgl-project/sglang
+gh run watch <RUN_ID> --repo sgl-project/sglang
+gh run rerun <RUN_ID> --repo sgl-project/sglang
+```
+
+Do not pair `gh run cancel` with `/rerun-failed-ci`; cancelled workflow runs do not match the handler's `failure` / `skipped` filter.
 
 When to pick something other than this:
 
 - PR missing `run-ci` label → `/tag-and-rerun-ci` (adds label + runs rerun-failed-ci).
 - Failure is **not** flaky — cancel + rerun just reproduces it and burns budget.
 
-If you want to **confirm** the flake reproduces before burning a full rerun, fire `/rerun-test <test-path>` in parallel with the cancel+rerun — it dispatches a separate `Rerun Test` workflow and won't slow the main pipeline. Remember it doesn't green the PR on its own.
+If you want to **confirm** the flake reproduces before burning a full rerun, fire `/rerun-test <test-path>` in parallel with the wait or urgent rerun — it dispatches a separate `Rerun Test` workflow and won't slow the main pipeline. Remember it doesn't green the PR on its own.
 
 ### Confirm it fired
 
@@ -272,7 +274,7 @@ The prompt offloads cadence decisions to the rules in §4 so the cron body stays
 
 - **Kernel wheel freshness**: the handler inspects `Build Wheel*` check-runs (CUDA + ARM) and upgrades to full `run.rerun()` if any didn't pass. `gh run rerun --failed` always does partial — you can silently test against a stale wheel.
 - **Multi-workflow sweep**: `/rerun-failed-ci` iterates **every** workflow run on the head SHA (pr-test, pr-test-extra, pr-test-sgl-kernel, jit-kernel, multimodal-gen…) so a failed sibling workflow gets retried in the same command. `gh run rerun <ID>` retries one run.
-- **Label / maintenance handling**: `/tag-and-rerun-ci` applies `run-ci` before rerunning, and `/rerun-test` pre-checks the maintenance gate. `gh run rerun` won't touch labels or honor `bypass-maintenance`, so reruns fast-deny without warning.
+- **Label / maintenance handling**: `/tag-and-rerun-ci` applies `run-ci` before rerunning, and `/rerun-test` pre-checks the maintenance gate. `gh run rerun` won't touch labels or pre-check maintenance, so reruns can fast-deny without warning.
 
 pr-gate's 120-min rate limit bypasses for maintainers, so it's not a concern here.
 
