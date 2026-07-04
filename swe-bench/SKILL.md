@@ -175,7 +175,7 @@ Evaluation also needs Docker — it spins up containers to apply patches and run
 
 **Before running eval after a partial rerun**: the harness skips instances that already have eval logs. If you used `--redo-existing` (or any rerun) you MUST first delete stale eval logs or it will score the OLD patches:
 ```bash
-rm -rf logs/run_evaluation/<run_id>/      # run_id is the -id arg to eval.sh, e.g. think_hy3
+rm -rf logs/run_evaluation/<run_id>/      # run_id is the -id arg to eval.sh (e.g. think_<model>)
 ```
 Symptom if you forget: the summary JSON's `resolved_instances` won't match a per-instance report.json aggregation (one is from the prior run, one from the rerun). Always reconcile the two — a mismatch means stale eval.
 
@@ -183,7 +183,7 @@ Symptom if you forget: the summary JSON's `resolved_instances` won't match a per
 ./eval.sh <think|non-think> [max_workers]
 ```
 
-`max_workers` defaults to `16` in the template (much faster than the upstream-default `5`). On a many-core host (≥64 cores) bump to `32`; on `ion-h200-8` (192 cores) `32` cuts eval wall-clock from ~80 min → ~20 min for a 500-instance run. **Start at `16`** then bump up if `docker ps -q | wc -l` shows headroom.
+`max_workers` defaults to `16` in the template (much faster than the upstream-default `5`). On a many-core host (≥64 cores) bump to `32`; on a ~192-core host `32` cuts eval wall-clock from ~80 min → ~20 min for a 500-instance run. **Start at `16`** then bump up if `docker ps -q | wc -l` shows headroom.
 
 **Report location & aggregation**: the per-instance `report.json` files live under `logs/run_evaluation/<run_id>/hosted_vllm__<model>/*/report.json` (NOT in `results/`). There is no top-level summary file on some versions — aggregate yourself:
 ```python

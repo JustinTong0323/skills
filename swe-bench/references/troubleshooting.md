@@ -244,7 +244,7 @@ Validated values:
 |---|---|---|
 | 16-core | 5-8 | ~120 min |
 | 64-core | 16 | ~40 min |
-| 192-core (ion-h200-8) | 32 | ~20 min |
+| 192-core | 32 | ~20 min |
 
 Going higher than 32 has diminishing returns (Docker daemon becomes the bottleneck).
 
@@ -256,7 +256,7 @@ Going higher than 32 has diminishing returns (Docker daemon becomes the bottlene
 
 **Fix**: Before eval, delete the run's eval log dir:
 ```bash
-rm -rf logs/run_evaluation/<run_id>/      # e.g. logs/run_evaluation/think_hy3/
+rm -rf logs/run_evaluation/<run_id>/      # e.g. logs/run_evaluation/think_<model>/
 ./eval.sh think 32
 ```
 Always cross-check the summary `resolved_instances` against a per-instance aggregation (see Phase 6). A mismatch is a red flag for stale eval.
