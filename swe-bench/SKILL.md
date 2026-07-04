@@ -50,6 +50,10 @@ Before benchmarking, verify the served model is launched with the right flags. T
 
    Set this via `model.model_kwargs.timeout` in `sglang_swebench.yaml`.
 
+6. **Do NOT manually set a small `--context-length`** — let sglang use the model's native `max_position_embeddings`. Thinking-mode turns are long (single responses routinely hit 60K+ tokens); a small `--context-length 32768` causes widespread `BadRequestError` (input + max_tokens > ctx) on long conversations. Manually setting it small is the single biggest source of false failures on thinking runs.
+
+7. **`--thinking` flag is a no-op for `reasoning_effort`-based models** — `--thinking` injects `chat_template_kwargs={"thinking": true}`, which models like Hunyuan ignore (their chat template uses `reasoning_effort: high|low|no_think`, not `thinking`). On such models `--thinking` silently leaves the model in `no_think` and accuracy collapses. If the model uses `reasoning_effort`, set it explicitly in `model.model_kwargs` (see troubleshooting #12).
+
 Verify on the server with:
 ```bash
 curl -s "$API_BASE/models"  # should list the model id
@@ -101,6 +105,7 @@ Generate these files in `/root/swe-bench/`:
 **sglang_swebench.yaml** — Read `scripts/sglang_swebench.yaml.template` from this skill directory. Copy it and replace the `model_name`, `api_base`, and timeout placeholders. Key settings that must be present:
 - `model.cost_tracking: "ignore_errors"` — without this, zero-cost local models crash with "Cost must be > 0.0"
 - `model.model_kwargs.timeout: 1200` — **litellm completion timeout** (NOT bash `environment.timeout`). For thinking workloads, set to 1200 s (or 2400 s for very large MoE models). Default 600 in template; bump for thinking.
+- `model.model_kwargs.temperature` / `model.model_kwargs.max_tokens` / `model.model_kwargs.reasoning_effort` — these MUST live under `model.model_kwargs`, NOT under `model:` top level. mini-swe-agent 2.4.x ignores `model.temperature` / `model.max_tokens`; the model then runs at default temperature=0 even in "thinking" mode. (The thinking overlay sets `model_kwargs.temperature` correctly — keep all sampling knobs in `model_kwargs`.)
 - `environment.timeout: 180` — bash command timeout per step (60s is too short, causes TimeoutExpired)
 - `environment.container_timeout: "12h"` — Docker container lifetime (2h is too short, containers get killed mid-run)
 - `agent.step_limit: 250` — max agent turns per instance
@@ -168,17 +173,26 @@ Monitor with: `docker ps -q | wc -l` (running containers) and `ls results/<mode>
 
 Evaluation also needs Docker — it spins up containers to apply patches and run test suites.
 
+**Before running eval after a partial rerun**: the harness skips instances that already have eval logs. If you used `--redo-existing` (or any rerun) you MUST first delete stale eval logs or it will score the OLD patches:
+```bash
+rm -rf logs/run_evaluation/<run_id>/      # run_id is the -id arg to eval.sh, e.g. think_hy3
+```
+Symptom if you forget: the summary JSON's `resolved_instances` won't match a per-instance report.json aggregation (one is from the prior run, one from the rerun). Always reconcile the two — a mismatch means stale eval.
+
 ```bash
 ./eval.sh <think|non-think> [max_workers]
 ```
 
 `max_workers` defaults to `16` in the template (much faster than the upstream-default `5`). On a many-core host (≥64 cores) bump to `32`; on `ion-h200-8` (192 cores) `32` cuts eval wall-clock from ~80 min → ~20 min for a 500-instance run. **Start at `16`** then bump up if `docker ps -q | wc -l` shows headroom.
 
-The report JSON may land in `/root/swe-bench/` root (not in `results/`). Check both:
-```bash
-ls /root/swe-bench/hosted_vllm__*.json
-ls results/<mode>/*.json
+**Report location & aggregation**: the per-instance `report.json` files live under `logs/run_evaluation/<run_id>/hosted_vllm__<model>/*/report.json` (NOT in `results/`). There is no top-level summary file on some versions — aggregate yourself:
+```python
+import json, glob
+fs = glob.glob('logs/run_evaluation/*/hosted_vllm_*/*/report.json')
+resolved = sum(1 for f in fs for iid, info in json.load(open(f)).items() if info.get("resolved"))
+print(f"Resolved: {resolved}/{len(fs)} = {100*resolved/len(fs):.1f}%")
 ```
+(The `-id` arg to `eval.sh` becomes the `<run_id>` segment; `report.json` is keyed by instance_id with a `"resolved"` bool.)
 
 ### Phase 7: Report
 

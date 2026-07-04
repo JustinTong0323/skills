@@ -248,6 +248,49 @@ Validated values:
 
 Going higher than 32 has diminishing returns (Docker daemon becomes the bottleneck).
 
+### 17. Stale eval logs after `--redo-existing` reruns
+
+**Symptom**: After rerunning a subset of instances with `--redo-existing` and running `./eval.sh`, the summary JSON's `resolved_instances` count disagrees with a per-instance `report.json` aggregation.
+
+**Cause**: `swebench.harness.run_evaluation` skips instances that already have eval logs under `logs/run_evaluation/<run_id>/`. When you reran instances (new patches in `preds.json`) but didn't clear the eval logs, the harness scores the OLD patches from the prior run for the non-reran instances and the NEW patches for the reran ones — and the two counts drift.
+
+**Fix**: Before eval, delete the run's eval log dir:
+```bash
+rm -rf logs/run_evaluation/<run_id>/      # e.g. logs/run_evaluation/think_hy3/
+./eval.sh think 32
+```
+Always cross-check the summary `resolved_instances` against a per-instance aggregation (see Phase 6). A mismatch is a red flag for stale eval.
+
+### 18. `RepeatedFormatError` is a model behavior issue, not a parser bug
+
+**Symptom**: A non-trivial minority of instances exit with `RepeatedFormatError`, lowering the submitted count.
+
+**Cause**: In thinking mode the model sometimes emits a plain-text response (describing what it's about to do) without issuing a `bash` tool call. mini-swe-agent feeds the format error back to the model, but it keeps replying without a tool call, and after N retries the instance is abandoned. This is the model breaking agentic discipline, NOT the tool-call parser failing.
+
+**Diagnose**: Inspect the trajectory. Find the assistant turn right before the first `No tool calls found in the response` user message. If that assistant turn HAS `tool_calls`, the parser is working and the model simply failed to emit one on a later turn. If it's missing `tool_calls` but contains a tool-like command in `content`, the parser may have dropped it — then it's a real parser issue.
+
+**Fix**: Tighten the prompt or lower temperature; don't touch the parser. These are intrinsic to thinking-mode agent loops.
+
+### 19. `num_reasoning_tokens: 0` in trajectories is not a parser failure
+
+**Symptom**: Trajectory entries show `num_reasoning_tokens: 0` even though thinking mode is on and the model is reasoning.
+
+**Cause**: mini-swe-agent / swebench don't read the `reasoning_content` field from the response; they only count `content` tokens. So `num_reasoning_tokens` is structurally always 0 on OpenAI-compatible endpoints that split reasoning out.
+
+**Fix**: Don't use this field to judge whether the parser works. Verify with a direct curl (Phase 0 probe): `reasoning_content` populated + `content` free of `<think>` = parser OK.
+
+### 20. Orphaned `sleep 12h` containers after a run restart
+
+**Symptom**: After killing and restarting a run, `docker ps -q | wc -l` keeps growing (100+) even though `--workers` is only 32.
+
+**Cause**: mini-swe-agent starts each instance in a `docker run -d ... sleep 12h` container. When you kill the run, `--rm` doesn't always clean up, and the old `sleep 12h` containers linger for 12h, accumulating across restarts. They cost CPU/RAM, not GPU.
+
+**Fix**: Before relaunching, stop the named minisweagent containers:
+```bash
+docker ps -q --filter name=minisweagent | xargs -r docker stop
+```
+Then restart the run; mini-swe-agent skips instances that already have a completed trajectory, so no work is lost.
+
 ## Recovery Procedures
 
 ### Full Reset (start fresh)
