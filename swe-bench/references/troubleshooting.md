@@ -291,6 +291,58 @@ docker ps -q --filter name=minisweagent | xargs -r docker stop
 ```
 Then restart the run; mini-swe-agent skips instances that already have a completed trajectory, so no work is lost.
 
+### 21. Server appears hung at startup — FlashInfer JIT compile, NOT a deadlock
+
+**Symptom**: Right after weights load and KV cache is allocated, the server freezes at `Running FlashInfer autotune with cache: ...` (or at `Capture target decode CUDA graph begin`). GPU utilization reads 0% on all ranks. The serve log mtime stops advancing for several minutes. Looks dead — but `grep -iE 'Segfault|scheduler_died'` finds nothing.
+
+**Cause**: FlashInfer JIT-compiles kernels on first use (esp. for a fresh arch like sm100/sm103, or after a `sgl-kernel` rebuild that invalidated the cache). In DP launches, one rank runs `flashinfer.jit.core.build_and_load` → `ninja` → `nvcc` → `cicc` compiling e.g. `fused_moe_trtllm_sm100`, while the other ranks block on `filelock.acquire` waiting for that one build to finish. Zero GPU utilization and no SGLang log lines are **expected** during this window. It is a CPU-bound single-rank compile, not a GPU deadlock.
+
+**Diagnose before killing**:
+```bash
+pgrep -af 'ninja|nvcc|cicc'          # present = actively compiling
+py-spy dump --pid <scheduler_pid>    # shows filelock.acquire / build_and_load
+top -bn1 | grep -E 'cicc|nvcc'      # ~100% CPU on one core
+```
+If you see `ninja`/`nvcc`/`cicc` running or `py-spy` shows `filelock.acquire` / `build_and_load`, **wait** — the first cold compile can take 5-15 min. Subsequent starts reuse the cache (seconds).
+
+**This burned a real session**: a freshly-cherry-picked top-k fix was misjudged as "causing a capture deadlock" and the server was killed 3×, when in fact it was fine — the JIT compile was just slow. Don't kill a "hung" startup without checking for active compilation. If you must force a faster boot for a smoke test, the cache (once warm) persists; do not reach for `--disable-flashinfer-autotune` / `--disable-cuda-graph` to work around a non-bug — that changes the benchmark口径.
+
+### 22. Server crashes mid-run → mass `InternalServerError` → rerun the failures
+
+**Symptom**: A run completes 500 trajectories but `exit_statuses_*.yaml` shows hundreds of `InternalServerError` (HTTP 500 / connection refused), and only a fraction have non-empty patches (e.g. 97/500). The server died or crashed repeatedly during the run.
+
+**Cause**: A long-context thinking request hit a model/kernel bug (e.g. NVFP4 DSA RoPE quantize OOB at single-seq pos ~101970 / ≈100K tokens, a known GLM-5.2-NVFP4 pre-fix crash), the scheduler segfaulted, and every in-flight + subsequent instance failed against a dead endpoint until the server was restarted.
+
+**Identify the failures**:
+```bash
+python3 -c "
+import yaml, glob
+d = yaml.safe_load(open(sorted(glob.glob('results/<mode>/exit_statuses_*.yaml'))[-1]))
+for k,v in d['instances_by_exit_status'].items(): print(k, len(v))
+"
+# InternalServerError / CalledProcessError / TimeoutExpired lists the instance IDs to rerun
+```
+
+**Fix**: Restart the server (and apply/verify the upstream fix for the root kernel bug if one exists), then rerun only the failed instances. Clean stale markers first:
+```bash
+python3 /path/to/skill/scripts/clean_results.py results/<mode>/   # drops exit_statuses, keeps good patches
+./run.sh --workers 32                                              # resumes, only runs missing/failed
+```
+The server-stability cliff is the failure mode here — a few kernel crashes can cascade into 400+ failed instances. Gate on `finish_reason` distribution + a GSM8K stop-rate check after restart (per `e2e-verification.md`), not just "server booted".
+
+### 23. `EADDRINUSE` / `DistNetworkError` on serve restart after `pkill -9`
+
+**Symptom**: After `pkill -9 -f sglang serve`, the next launch exits immediately with `DistNetworkError: ... EADDRINUSE` (exit code -3) before any weight loading.
+
+**Cause**: Torch distributed rendezvous ports (10243-10250 range) stay in `TIME_WAIT` for ~60s after a hard kill. Relaunching inside that window collides.
+
+**Fix**: Wait for the ports to free, or confirm they're free before relaunch:
+```bash
+ss -tln | grep -E '1024[0-9]|30000'      # empty = safe to relaunch
+# still occupied? wait ~60s, or: kill the lingering python if any
+```
+Also note: `pkill -9 -f sglang` can match the `bash -c` wrapper of an `rx devbox run` transport and kill that too (exit 137). Use `tmux kill-session -t <name>` first, then targeted `pkill -f 'sglang serve|scheduler_TP'`, and verify with `pgrep -af scheduler_TP`.
+
 ## Recovery Procedures
 
 ### Full Reset (start fresh)

@@ -1,7 +1,7 @@
 ---
 name: swe-bench
 description: "Run SWE-bench Verified (the 500-instance coding benchmark) against any OpenAI-compatible endpoint. Use this skill whenever the user mentions SWE-bench, wants to benchmark a model on coding tasks, evaluate an LLM's code repair ability, run swebench verified, test a model served by SGLang or vLLM on software engineering tasks, or compare thinking vs non-thinking mode on SWE-bench. Also trigger when the user says 'run the benchmark', 'evaluate on swe-bench', 'test this endpoint on coding', or provides an API endpoint URL and asks to benchmark it."
-version: 1.1.0
+version: 1.2.0
 ---
 
 # SWE-bench Verified Runner
@@ -150,6 +150,8 @@ xargs -a missing_images.txt -P 16 -I {} docker pull {}
 
 This can take 30-60 minutes for a fresh pull. Report progress to the user.
 
+**Docker Hub anonymous rate-limit (429):** anonymous pulls cap at ~100/6h per IP. Pulling ~464/500 images in one batch will hit `toomanyrequests: You have reached your pull rate limit`. Fix: `docker login` (a free account raises the cap to 200/6h); for a full 500-image pull, login is effectively required. Pull resumes cleanly after login — already-pulled images are skipped.
+
 ### Phase 5: Run
 
 ```bash
@@ -168,6 +170,8 @@ For `--instances`, convert comma-separated IDs to a `--filter` regex.
 Monitor with: `docker ps -q | wc -l` (running containers) and `ls results/<mode>/ | wc -l` (completed trajectories).
 
 **Watch for SWA collapse**: if `docker ps -q | wc -l` stays high (= the workers count) for >30 min and `ls results/<mode>/ | wc -l` doesn't grow, the server's KV cache is saturated and every in-flight request is timing out. Kill the run, halve workers, restart. See troubleshooting entry "Queue collapse / SWA saturation".
+
+**Don't trust `preds.json` as a done signal**: mini-swe-agent writes `preds.json` incrementally from the very first instance — a non-empty `preds.json` (or a count of 500) means trajectories were *recorded*, not that the run finished cleanly. The only reliable completion signal is **the tmux session (or driver process) exiting**. Before declaring done: `tmux has-session -t sweb && echo running || echo ended`, and check the runner log's tail for a clean shutdown + the expected 500 count. Reading "500 in preds.json" as "done" has caused premature `./eval.sh` runs against an in-flight (or crashed) `preds.json`.
 
 ### Phase 6: Evaluate
 
@@ -255,3 +259,6 @@ Read `references/troubleshooting.md` for the full list of known issues and fixes
 - **0 completions in 1h with workers near max-running-requests** — Server queue saturated. Halve workers and restart.
 - **38 → 11 inst/hr after enabling EAGLE specdec** — EAGLE is harmful for thinking-mode. Drop `--speculative-algo` and relaunch.
 - **Litellm `Timeout` errors mid-instance** — `model.model_kwargs.timeout` is too low. Bump to 1200 (or 2400 for big MoE thinking).
+- **Server "frozen" at startup (0% GPU, log stuck at `Running FlashInfer autotune` / `Capture CUDA graph`)** — FlashInfer JIT is compiling on one rank while the rest wait on a file lock. Check `pgrep ninja|nvcc|cicc` + `py-spy dump` before killing — cold compile takes 5-15 min, not a deadlock. Don't reach for `--disable-*` flags to work around it.
+- **Run finished 500 but hundreds are `InternalServerError`** — the server crashed mid-run (often a long-context kernel bug). Restart server, then `clean_results.py` + rerun failed instances only.
+- **`EADDRINUSE` / `DistNetworkError` on serve restart** — torch rendezvous ports (1024x) in TIME_WAIT after `pkill -9`. Wait ~60s / confirm `ss -tln` is clear before relaunch.
