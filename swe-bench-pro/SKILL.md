@@ -49,6 +49,8 @@ The bootstrap records repository revisions in `RUNNER_REVISIONS.txt`. Preserve t
 
 The Pro repository's recorded mini-SWE-agent submodule revision may predate Pro support. The bootstrap deliberately fetches the Scale fork's `main` and verifies that `mini-extra run-batch` exists. Do not reset the submodule back to the recorded parent revision unless that revision contains `run-batch` and `config/swebp.yaml`.
 
+For local Docker, require an authenticated Docker Hub session on the runner before pulling images or starting a full run. Explicitly ask the user to run `docker login` interactively on that host when authentication has not been verified; do not request or handle their password or token. Continue only after the user confirms login and the runner's Docker config contains Docker Hub credentials. An already-cached image does not prove that later pulls are authenticated.
+
 ## Prepare instances
 
 Generate both the inference YAML and evaluator input from the same dataset snapshot:

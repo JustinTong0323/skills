@@ -22,6 +22,8 @@ Some Pro images start with untracked runtime files such as NodeBB's `appendonlyd
 
 ## Image pull or tag fails
 
+Confirm that the user completed `docker login` interactively on the runner and that its Docker config contains Docker Hub credentials. Anonymous pulls can hit Docker Hub rate limits during a full run even when smoke tests use cached images. Do not ask the user to paste credentials into a command or chat.
+
 Confirm the instance YAML uses the dataset's `dockerhub_tag` verbatim under `jefzda/sweap-images`. Test one image with `docker pull`. On ARM, use `linux/amd64` for evaluation; inference support depends on the runtime.
 
 ## Evaluation says zero matching patches
