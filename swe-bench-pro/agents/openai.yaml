@@ -1,0 +1,4 @@
+interface:
+  display_name: "SWE-bench Pro Runner"
+  short_description: "Run and score SWE-bench Pro reliably"
+  default_prompt: "Use $swe-bench-pro to run SWE-bench Pro against my OpenAI-compatible endpoint."
