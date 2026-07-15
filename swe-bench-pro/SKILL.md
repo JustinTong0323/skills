@@ -1,6 +1,7 @@
 ---
 name: swe-bench-pro
 description: Run the public ScaleAI SWE-bench Pro benchmark against an OpenAI-compatible or hosted model endpoint with the official Scale evaluator and mini-SWE-agent scaffold. Use when a user asks to set up, smoke-test, run, resume, evaluate, troubleshoot, or compare SWE-bench Pro runs; generate Pro-compatible instances or patch files; use local Docker or Modal for Pro; or distinguish SWE-bench Pro from SWE-bench Verified.
+version: 1.1.0
 ---
 
 # SWE-bench Pro Runner
@@ -16,6 +17,7 @@ Obtain:
 - thinking or non-thinking mode and model-specific request fields
 - inference workers and evaluation workers
 - run directory and run ID
+- number of independent runs and per-run seeds for Pass@k
 - local Docker or Modal
 - full dataset, slice, or instance filter
 
@@ -34,6 +36,22 @@ Use:
 - Evaluator: `SWE-bench_Pro-os/swe_bench_pro_eval.py`
 
 Read [references/upstream.md](references/upstream.md) before changing revisions, image naming, prompt formatting, or evaluator commands.
+
+## Protect the runner
+
+Prefer a dedicated runner for a full Pro run. Before reusing a host, inspect active benchmark processes, containers, disk consumers, and existing result directories. If another benchmark is in progress, acquire another machine unless both jobs have explicitly partitioned disk, Docker resources, ports, and result paths. Never prune containers, images, or files that belong to another run.
+
+Check capacity before pulling or evaluating:
+
+```bash
+df -h /
+docker system df
+free -h
+nproc
+ps -eo pid,stat,cmd | grep -E '[m]ini-extra|[s]we_bench_pro_eval'
+```
+
+Pro images and evaluator outputs can consume hundreds of GB. Leave enough headroom for cold pulls, extracted image layers, per-instance outputs, and retry logs. If the estimate is uncertain or the volume is already busy, use a large-volume runner rather than relying on cleanup during a live run.
 
 ## Set up
 
@@ -87,6 +105,19 @@ Use `2400` seconds for very slow reasoning models. This timeout controls model c
 
 Check the model list and run one short completion. For reasoning models, derive accepted reasoning fields and values from the selected model's chat template, then verify that reasoning is separated from final content and that tool or response formatting matches the served model. Apply the same server-side parser, context-length, and concurrency checks used for a Verified run.
 
+Reasoning controls are model-specific, not SGLang-version-specific. Do not infer that `none`, `no_think`, `thinking`, or another value is valid because it worked for a different model on the same server version.
+
+For long reasoning workloads, remove MTP/EAGLE speculative decoding unless a representative Pro smoke test proves a gain. Tune chunked prefill for the intended batch size instead of copying a small-batch value. A stable GLM-5.2-NVFP4 reference on four large-memory GPUs used `--chunked-prefill-size 32768`, `--max-prefill-tokens 32768`, and no speculative-decoding flags; treat this as a measured reference, not a universal default.
+
+When the endpoint is reached through a tunnel or port forward, verify both ends before every run and during monitoring:
+
+```bash
+curl -fsS --max-time 5 http://127.0.0.1:FORWARDED_PORT/health
+curl -fsS --max-time 5 http://SERVER_HOST:SERVER_PORT/health
+```
+
+Run the forward under a persistent supervisor and record its PID or session. If it dies, restore the forward and confirm `/models` plus one completion before resuming failed instances.
+
 For an endpoint on the inference host, the mini-SWE-agent Python process calls the endpoint directly; task Docker containers do not need API access.
 
 ## Smoke test inference
@@ -123,6 +154,26 @@ Resume by rerunning the identical command without `--redo-existing`. The runner 
 
 Treat the driver process exit as the completion signal. A populated `preds.json` is not sufficient.
 
+For Pass@k, render one config per run with a distinct seed and a distinct output directory. Keep prompt, model, temperature, reasoning settings, limits, and dataset manifest identical. Stagger run starts on a single runner so cold image pulls do not stampede Docker Hub and the local disk.
+
+After each driver exits, reconcile artifacts instead of trusting the wrapper return code alone. Require the expected number of unique trajectory and prediction IDs and inspect exit statuses for environment-startup failures. A terminal-rendering exception can occur after all trajectories were written, while a clean-looking wrapper can still leave failed environments. Delete only the failed environment artifacts and their `preds.json` entries, then resume the same run.
+
+Do not disable reasoning merely because progress is slow. First check completed-trajectory growth, endpoint queues, tunnel health, GPU utilization, Docker pulls, disk I/O pressure, and tasks near their container timeout.
+
+## Monitor a long run
+
+Check at a fixed interval and report only material changes. Track:
+
+- trajectories and predictions against the expected manifest count for every run
+- driver/finalizer exit markers and active processes
+- environment failures eligible for targeted retry
+- endpoint and forwarded-port health
+- running containers, free disk, and Docker disk usage
+- D-state process count and `/proc/pressure/io`
+- evaluation output count, merged-result count, retry errors, and strict summaries
+
+Do not interpret historical retry errors as current failure after coverage is complete. Final output coverage and the latest process state are authoritative.
+
 ## Convert patches
 
 Convert the run output to the Pro evaluator schema:
@@ -135,7 +186,7 @@ python <skill-dir>/scripts/convert_predictions.py \
   --expected data/generated/raw_samples.jsonl
 ```
 
-The converter excludes empty patches, reports missing IDs, and rejects duplicates or unknown IDs. Missing predictions must still count as unresolved in the final strict score.
+The converter excludes empty patches, reports missing prediction records separately from empty patches, and rejects duplicates or unknown IDs. `missing_or_empty` is the total strict-score penalty before evaluation. Both missing and empty predictions must count as unresolved in the final strict score.
 
 ## Smoke test evaluation
 
@@ -160,6 +211,20 @@ Rerun the evaluator with an appropriate worker count. Start around 8-16 local wo
 
 The evaluator writes per-instance logs and `evaluation/eval_results.json`.
 
+For a cold full-dataset evaluation, prefer resumable chunks such as 32 expected IDs. Keep the full raw sample file, slice `patches.json` by those IDs, and reuse one persistent evaluation directory. Start the first cold-cache run around 4 workers; after its images are cached, 8-16 workers is usually safer for later runs. After every chunk:
+
+1. require exit code zero;
+2. verify one `<prefix>_output.json` exists for every submitted patch in the chunk;
+3. merge the chunk's `eval_results.json` into a persistent merged mapping;
+4. record the completed expected-ID offset;
+5. prune only images owned by this run when disk pressure requires it.
+
+Never delete the evaluation directory when resuming. Restart from the last verified offset and let existing per-instance outputs remain available. The official evaluator may overwrite its top-level result mapping for the current invocation, so preserve and validate the merged mapping yourself.
+
+Docker SDK clients default to a short HTTP timeout that can fail while a large image is still pulling. If logs show a 60-second `ReadTimeout` during cold pulls, use a recorded local evaluator patch that changes `docker.from_env()` to `docker.from_env(timeout=1800)`, then retry the same chunk. Do not classify a timed-out pull as a model failure.
+
+If the runner accumulates many D-state processes or sustained writeback pressure, stop launching new chunks, preserve result directories and the last verified offset, then recover the host. After recovery, verify filesystem health, Docker, and result coverage before resuming.
+
 ## Report strict results
 
 Never report only the evaluator's printed accuracy. It divides by evaluated patches rather than the full expected set.
@@ -168,7 +233,8 @@ Never report only the evaluator's printed accuracy. It divides by evaluated patc
 python <skill-dir>/scripts/summarize_results.py \
   --eval-results results/RUN_ID/evaluation/eval_results.json \
   --expected data/generated/raw_samples.jsonl \
-  --predictions results/RUN_ID/patches.json
+  --predictions results/RUN_ID/patches.json \
+  --require-complete-submitted
 ```
 
 Report:
@@ -180,6 +246,40 @@ Report:
 - model, endpoint type, prompt/config, temperature/reasoning settings, call limit, workers, and backend
 
 Use strict accuracy for comparisons and leaderboard-style claims.
+
+## Report empirical Pass@k
+
+After all runs pass the single-run coverage gate, aggregate them with:
+
+```bash
+python <skill-dir>/scripts/summarize_pass_at_k.py \
+  --expected data/generated/raw_samples.jsonl \
+  --run results/RUN_1 \
+  --run results/RUN_2 \
+  --run results/RUN_3 \
+  --run results/RUN_4 \
+  --output results/MODEL-pass-at-4.json
+```
+
+The aggregator requires every non-empty submitted patch to have exactly one boolean evaluation result. It reports each strict score, the resolved union, empirical Pass@k, and the number of expected instances resolved in exactly `0..k` runs. The histogram must sum to the expected dataset count.
+
+Call this metric empirical Pass@k: it is the observed union across these exact independent runs, not an extrapolated estimator for an unobserved sampling budget.
+
+## Completion gate
+
+Before declaring a full run complete, verify all of:
+
+1. The dataset manifest count and unique IDs match every run's trajectories and prediction records.
+2. No environment-startup failures remain after targeted retries.
+3. Conversion summaries distinguish missing records, empty patches, and non-empty patches.
+4. Evaluation output count equals the non-empty patch count for every run.
+5. Evaluation-result keys exactly equal submitted non-empty patch IDs and all values are boolean.
+6. Strict summaries use the full expected denominator and report zero invalid results.
+7. The Pass@k histogram sums to the expected count and an independent union recomputation matches the report.
+8. Drivers, evaluators, and finalizers have exited; their final exit markers are zero.
+9. Endpoint, forward, Docker, filesystem, and disk state are recorded in the handoff or report.
+
+Keep dataset manifests, runner revisions, configs, conversion summaries, evaluation results, strict summaries, Pass@k output, and relevant retry logs together as the experiment artifact set.
 
 ## Modal path
 

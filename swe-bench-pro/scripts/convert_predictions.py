@@ -73,7 +73,8 @@ def main():
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(patches, indent=2) + "\n")
-    missing = [
+    missing = [instance_id for instance_id in expected if instance_id not in seen]
+    missing_or_empty = [
         instance_id
         for instance_id in expected
         if instance_id not in {p["instance_id"] for p in patches}
@@ -86,6 +87,7 @@ def main():
                 "nonempty": len(patches),
                 "empty": len(empty),
                 "missing": len(missing),
+                "missing_or_empty": len(missing_or_empty),
                 "output": str(output),
             },
             indent=2,
