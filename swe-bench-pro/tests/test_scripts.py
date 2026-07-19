@@ -103,6 +103,29 @@ class ScriptTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("missing results", result.stderr)
 
+    def test_summarize_pass_at_k_rejects_duplicate_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            expected = tmp / "expected.jsonl"
+            expected.write_text(json.dumps({"instance_id": "a"}) + "\n")
+            run = self.make_run(tmp, "run", {"a": True})
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    ROOT / "scripts/summarize_pass_at_k.py",
+                    "--expected",
+                    expected,
+                    "--run",
+                    run,
+                    "--run",
+                    run,
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("must be distinct", result.stderr)
+
     def test_strict_summary_rejects_incomplete_evaluation(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)

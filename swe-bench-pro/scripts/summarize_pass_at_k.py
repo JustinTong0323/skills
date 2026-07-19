@@ -82,9 +82,13 @@ def summarize_run(run_dir, expected_ids):
 
 
 def build_report(run_dirs, expected_ids):
+    resolved_run_dirs = [Path(run_dir).resolve() for run_dir in run_dirs]
+    if len(resolved_run_dirs) != len(set(resolved_run_dirs)):
+        raise ValueError("Run directories must be distinct")
+
     runs = []
     resolved_sets = []
-    for run_dir in run_dirs:
+    for run_dir in resolved_run_dirs:
         summary, resolved = summarize_run(run_dir, expected_ids)
         runs.append(summary)
         resolved_sets.append(resolved)

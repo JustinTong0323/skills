@@ -1,7 +1,6 @@
 ---
 name: swe-bench-pro
 description: Run the public ScaleAI SWE-bench Pro benchmark against an OpenAI-compatible or hosted model endpoint with the official Scale evaluator and mini-SWE-agent scaffold. Use when a user asks to set up, smoke-test, run, resume, evaluate, troubleshoot, or compare SWE-bench Pro runs; generate Pro-compatible instances or patch files; use local Docker or Modal for Pro; or distinguish SWE-bench Pro from SWE-bench Verified.
-version: 1.1.0
 ---
 
 # SWE-bench Pro Runner
@@ -261,7 +260,7 @@ python <skill-dir>/scripts/summarize_pass_at_k.py \
   --output results/MODEL-pass-at-4.json
 ```
 
-The aggregator requires every non-empty submitted patch to have exactly one boolean evaluation result. It reports each strict score, the resolved union, empirical Pass@k, and the number of expected instances resolved in exactly `0..k` runs. The histogram must sum to the expected dataset count.
+The aggregator requires distinct run directories and exactly one boolean evaluation result for every non-empty submitted patch. It reports each strict score, the resolved union, empirical Pass@k, and the number of expected instances resolved in exactly `0..k` runs. The histogram must sum to the expected dataset count.
 
 Call this metric empirical Pass@k: it is the observed union across these exact independent runs, not an extrapolated estimator for an unobserved sampling budget.
 
