@@ -58,6 +58,44 @@ def task_outcomes(eval_result: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return outcomes
 
 
+def load_config(path: str | Path) -> dict[str, Any]:
+    candidate = Path(path)
+    config_path = candidate / "config.json" if candidate.is_dir() else candidate
+    with config_path.open() as config_file:
+        return json.load(config_file)
+
+
+def normalized_config(
+    config: dict[str, Any], ignored_keys: set[str] | None = None
+) -> dict[str, Any]:
+    ignored = {"job_name"} if ignored_keys is None else ignored_keys
+    return {key: value for key, value in config.items() if key not in ignored}
+
+
+def config_differences(left: Any, right: Any, path: str = "$") -> list[str]:
+    if type(left) is not type(right):
+        return [path]
+    if isinstance(left, dict):
+        differences: list[str] = []
+        for key in sorted(set(left) | set(right)):
+            child = f"{path}.{key}"
+            if key not in left or key not in right:
+                differences.append(child)
+            else:
+                differences.extend(config_differences(left[key], right[key], child))
+        return differences
+    if isinstance(left, list):
+        differences = []
+        for index in range(max(len(left), len(right))):
+            child = f"{path}[{index}]"
+            if index >= len(left) or index >= len(right):
+                differences.append(child)
+            else:
+                differences.extend(config_differences(left[index], right[index], child))
+        return differences
+    return [] if left == right else [path]
+
+
 def expected_task_count(
     result: dict[str, Any], config: dict[str, Any], eval_count: int
 ) -> int | None:
@@ -73,7 +111,9 @@ def summarize_eval(
     key: str,
     eval_result: dict[str, Any],
     expected_tasks: int | None,
+    attempts: int,
     complete: bool,
+    target_passes: int | None,
 ) -> dict[str, Any]:
     pairs = reward_trials(eval_result)
     outcomes = task_outcomes(eval_result)
@@ -82,6 +122,31 @@ def summarize_eval(
     successful_tasks = sum(entry["passed"] for entry in outcomes.values())
     denominator = expected_tasks or len(outcomes)
     lower_bound = successful_tasks / denominator if denominator else None
+    exhausted_failures = sum(
+        not entry["passed"] and entry["attempts"] >= attempts
+        for entry in outcomes.values()
+    )
+    optimistic_successful_tasks = (
+        expected_tasks - exhausted_failures if expected_tasks is not None else None
+    )
+    upper_bound = (
+        optimistic_successful_tasks / expected_tasks
+        if expected_tasks and optimistic_successful_tasks is not None
+        else None
+    )
+    expected_trials = expected_tasks * attempts if expected_tasks is not None else None
+    ungraded_trials = (
+        max(expected_trials - len(pairs), 0) if expected_trials is not None else None
+    )
+    target_met = (
+        successful_tasks >= target_passes if target_passes is not None else None
+    )
+    if target_met is True:
+        target_reachable = True
+    elif optimistic_successful_tasks is not None and target_passes is not None:
+        target_reachable = optimistic_successful_tasks >= target_passes
+    else:
+        target_reachable = None
     return {
         "key": key,
         "n_trials": eval_result.get("n_trials"),
@@ -89,21 +154,33 @@ def summarize_eval(
         "mean": (eval_result.get("metrics") or [{}])[0].get("mean"),
         "passed_trials": passed_trials,
         "failed_trials": failed_trials,
+        "graded_trials": len(pairs),
+        "expected_trials": expected_trials,
+        "ungraded_trials": ungraded_trials,
         "observed_tasks": len(outcomes),
         "successful_tasks": successful_tasks,
         "expected_tasks": expected_tasks,
+        "exhausted_failed_tasks": exhausted_failures,
+        "optimistic_successful_tasks": optimistic_successful_tasks,
         "pass_at_attempts": lower_bound if complete else None,
         "partial_pass_at_attempts_lower_bound": None if complete else lower_bound,
+        "partial_pass_at_attempts_upper_bound": None if complete else upper_bound,
+        "target_passes": target_passes,
+        "target_reachable": target_reachable,
+        "target_met": target_met,
         "harbor_pass_at_k": eval_result.get("pass_at_k", {}),
         "exception_stats": eval_result.get("exception_stats", {}),
     }
 
 
-def summarize(path: str | Path) -> dict[str, Any]:
+def summarize(path: str | Path, target_passes: int | None = None) -> dict[str, Any]:
+    if target_passes is not None and target_passes < 0:
+        raise ValueError("target_passes must be non-negative")
     result, config, result_path = load_job(path)
     stats = result.get("stats", {})
     evals = stats.get("evals", {})
     complete = is_complete(result)
+    attempts = int(config.get("n_attempts", 1))
     expected_tasks = expected_task_count(result, config, len(evals))
     return {
         "path": str(result_path),
@@ -112,7 +189,7 @@ def summarize(path: str | Path) -> dict[str, Any]:
         "started_at": result.get("started_at"),
         "finished_at": result.get("finished_at"),
         "complete": complete,
-        "n_attempts": int(config.get("n_attempts", 1)),
+        "n_attempts": attempts,
         "n_concurrent_trials": config.get("n_concurrent_trials"),
         "n_total_trials": result.get("n_total_trials"),
         "n_completed_trials": stats.get("n_completed_trials"),
@@ -126,7 +203,14 @@ def summarize(path: str | Path) -> dict[str, Any]:
         "n_output_tokens": stats.get("n_output_tokens"),
         "cost_usd": stats.get("cost_usd"),
         "evals": [
-            summarize_eval(key, eval_result, expected_tasks, complete)
+            summarize_eval(
+                key,
+                eval_result,
+                expected_tasks,
+                attempts,
+                complete,
+                target_passes,
+            )
             for key, eval_result in evals.items()
         ],
     }

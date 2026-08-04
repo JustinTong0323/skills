@@ -1,7 +1,7 @@
 ---
 name: terminal-bench-harbor
-description: "Run Terminal-Bench 2.1 with Harbor against a local or remote SGLang/OpenAI/Anthropic-compatible endpoint. Use whenever the user mentions Terminal-Bench, TB2.1, Harbor evaluation, Terminus-2, Claude Code or Pi as a Harbor harness, pass@1/pass@k, or asks to benchmark an agentic model in Docker terminal tasks. Covers runner sizing, endpoint preflight, reproducible configs, smoke gates, detached execution, read-only monitoring, completion audits, harness comparison, and failure attribution."
-version: 1.0.0
+description: "Run Terminal-Bench 2.1 with Harbor against a local or remote SGLang/OpenAI/Anthropic-compatible endpoint. Use whenever the user mentions Terminal-Bench, TB2.1, Harbor evaluation, Terminus-2, Claude Code or Pi as a Harbor harness, pass@1/pass@k, or asks to benchmark an agentic model in Docker terminal tasks. Covers runner sizing, endpoint preflight, reproducible configs, smoke gates, detached execution, score-ceiling monitoring, completion audits, harness comparison, and failure attribution."
+version: 1.1.0
 ---
 
 # Terminal-Bench with Harbor
@@ -32,6 +32,8 @@ Gather or discover these before writing a config:
 6. Trial concurrency, attempts per task, and runner TTL.
 7. Agent-timeout and retry policy. These change evaluation semantics and must never be silently changed.
 8. Dataset ref. Pin the resolved digest instead of relying on `latest` for a scored run.
+9. Baseline or target score, and whether an optimistic score ceiling may stop the run.
+10. Durable artifact destination and which dedicated resources should be released afterward.
 
 For the 89-task TB2.1 package used in the validated Harbor 0.20.0 run:
 
@@ -49,6 +51,9 @@ Re-resolve and record the digest when intentionally testing a newer dataset revi
 - Treat infrastructure, harness, API, agent, verifier, and model failures as different categories even when all receive reward zero.
 - Do not intervene in an active agent unless the user authorized recovery. Killing a process, injecting guidance, editing task files, or adding a timeout changes the run.
 - Do not publish a partial aggregate as a final score.
+- Before a controlled rerun, compare resolved configs structurally and prove that only approved identity fields changed.
+- Define any score cutoff before launch. Never invent or tighten a stopping rule after seeing partial outcomes.
+- Preserve the last pre-stop snapshot. Shutdown can race with natural trial completion, and the finalized artifact may count cancelled trials as completed slots.
 
 ## Phase 0: inspect journals and preserve the server recipe
 
@@ -61,15 +66,9 @@ curl -fsS "$OPENAI_BASE/models"
 curl -fsS -o /dev/null -w '%{http_code}\n' "$SERVER_ROOT/health"
 ```
 
-Probe the actual reasoning and tool-call contract with a small request before Harbor. Keep the model-specific reasoning parser, tool parser, context length, quantization, parallelism, and speculative algorithm unchanged during a harness A/B.
+Probe the actual reasoning and tool-call contract with a small request before Harbor. Keep the model-specific reasoning parser, tool parser, context length, quantization, parallelism, and speculative algorithm unchanged during a harness A/B. Record the runtime image digest and the code revision reported inside the running server; a local checkout SHA does not prove what the endpoint is serving.
 
-DeepSeek-V4-Flash-0731 specifically uses its bundled DSpark head with:
-
-```text
---speculative-algorithm DSPARK
-```
-
-Do not substitute `DRAFT_EXTEND`, `EAGLE`, or a separate draft model for that recipe.
+Model-specific launch recipes are part of benchmark identity. Do not substitute a different speculative algorithm, draft model, quantization path, or parser because the replacement appears functionally similar.
 
 ## Phase 1: provision and preflight the Harbor runner
 
@@ -130,6 +129,16 @@ python3 "$TB_HARBOR_SKILL_DIR/scripts/render_config.py" \
 
 The renderer supports all three harnesses and writes owner-only JSON. See [harnesses.md](references/harnesses.md) for exact differences and additional flags.
 
+For a controlled rerun, render a new job name and compare the resolved config with the prior run:
+
+```bash
+python3 "$TB_HARBOR_SKILL_DIR/scripts/compare_configs.py" \
+  /home/ubuntu/tb21/jobs/PRIOR/config.json \
+  /home/ubuntu/tb21/configs/RERUN.json
+```
+
+The comparison ignores only top-level `job_name` by default, exits 0 when the remaining structure is identical, and exits 1 with the differing JSON paths otherwise. Use `--ignore-key` only for another explicitly approved identity-only field.
+
 Timeout policy must be explicit:
 
 - Omit `--agent-timeout-multiplier` to retain task-defined benchmark deadlines.
@@ -184,11 +193,30 @@ A direct API probe alone does not authorize the 89-task run.
 Long `rx devbox run` or SSH commands can die with the transport. Start Harbor in a detached session on the runner and write a PID, log, and exit-status file. Never use the existence of `result.json` as the done signal; Harbor writes it incrementally.
 
 ```bash
-setsid bash -lc 'harbor run --config /home/ubuntu/tb21/configs/RUN.json --yes > /home/ubuntu/tb21/RUN.log 2>&1; printf "%s\n" "$?" > /home/ubuntu/tb21/RUN.done' </dev/null &
+setsid bash -lc '
+harbor run --config /home/ubuntu/tb21/configs/RUN.json --yes > /home/ubuntu/tb21/RUN.log 2>&1 &
+harbor_pid=$!
+printf "%s\n" "$harbor_pid" > /home/ubuntu/tb21/RUN.harbor.pid
+wait "$harbor_pid"
+status=$?
+printf "%s\n" "$status" > /home/ubuntu/tb21/RUN.done
+exit "$status"
+' </dev/null > /home/ubuntu/tb21/RUN.wrapper.log 2>&1 &
 printf '%s\n' "$!" > /home/ubuntu/tb21/RUN.pid
 ```
 
 Scale from the successful smoke. c32 was validated with a 48-vCPU runner, corrected Docker pools, and an SGLang server whose request queue stayed at zero. GPU utilization alone does not prove overload; inspect running requests, queued requests, KV/SWA pressure, response errors, and completion rate.
+
+The wrapper PID keeps the job independent of the transport, while `RUN.harbor.pid` identifies the driver. Before an authorized stop, validate both command lines and signal the Harbor driver. This leaves the wrapper alive to record the real exit status while Harbor performs task cleanup:
+
+```bash
+ps -o pid=,pgid=,stat=,cmd= -p \
+  "$(cat /home/ubuntu/tb21/RUN.pid)" \
+  "$(cat /home/ubuntu/tb21/RUN.harbor.pid)"
+kill -TERM "$(cat /home/ubuntu/tb21/RUN.harbor.pid)"
+```
+
+Escalate to the validated session process group only if the driver cannot clean up its children, and record that the wrapper may then be unable to write `RUN.done`.
 
 ## Phase 5: monitor without changing the run
 
@@ -201,6 +229,19 @@ docker ps --format '{{.Names}}|{{.Status}}'
 find /home/ubuntu/tb21/jobs/RUN -mindepth 2 -maxdepth 2 -name result.json | wc -l
 curl -fsS -o /dev/null -w '%{http_code}\n' "$SERVER_ROOT/health"
 ```
+
+If the user authorized a target-based cutoff, inspect the optimistic ceiling rather than Harbor's incremental mean:
+
+```bash
+python3 "$TB_HARBOR_SKILL_DIR/scripts/summarize_job.py" \
+  /home/ubuntu/tb21/jobs/RUN \
+  --target-passes TARGET \
+  --fail-if-target-unreachable
+```
+
+Exit 3 means the optimistic ceiling is strictly below the target. Equality remains reachable and must not stop. Run the polling loop as a separate detached watchdog on the runner, log every snapshot, and stop only the previously validated Harbor driver. Any other nonzero exit indicates a read or parsing failure and must not trigger termination.
+
+For pass@1, the optimistic ceiling is `passes + ungraded trials`. For pass@k, a task remains potentially successful until it has either passed or exhausted all configured attempts. The summary reports a partial lower-to-upper range; neither bound is a final score.
 
 When progress stops, classify before acting:
 
@@ -235,6 +276,15 @@ sha256sum /home/ubuntu/tb21/jobs/RUN/result.json /home/ubuntu/tb21/jobs/RUN/conf
 
 Trial-local JSON can be invalid after Harbor redaction inserts a literal `[REDACTED]`. Prefer the valid aggregate and inspect `exception.txt`, agent logs, session JSONL, and verifier artifacts for that trial.
 
+An intentionally stopped job is not complete even if its finalized stats say every slot is completed. Audit it with the last pre-stop snapshot and reward records:
+
+- report graded passes and failures separately from errors and cancellations;
+- report the optimistic final ceiling, not the post-cancellation aggregate mean;
+- record the exact cutoff condition, snapshot time, signal target, and driver exit;
+- list trials that completed or were cancelled during the shutdown race.
+
+Before releasing an ephemeral runner, copy aggregate `result.json`, resolved `config.json`, cutoff snapshots, driver/watchdog logs, and relevant server logs to durable storage. Verify hashes after transfer. Trial directories can be retained selectively when their size makes full archival impractical.
+
 ## Phase 7: compare harnesses and report
 
 Compare only complete matched jobs by default:
@@ -255,7 +305,9 @@ Report:
 - harness, protocol, reasoning, sampling, timeout, and server differences;
 - infrastructure incidents and whether they affected scoring.
 
-An official-score gap is not a model regression until harness and protocol differences are controlled. For DeepSeek-V4-Flash-0731, the published 82.7% uses an unreleased DeepSeek Harness in minimal mode with maximum reasoning, temperature 1, and top-p 0.95. Claude Code and stock Pi are not strict reproductions of that setup.
+An official-score gap is not a model regression until harness and protocol differences are controlled. A published run may use a private harness, different prompt profile, sampling policy, tool protocol, or timeout behavior. When that setup is unavailable, report the local run as a different harness evaluation rather than a strict reproduction.
+
+For stochastic pass@1 reruns, compare outcomes only on tasks that reached natural grading in both jobs. Report both directions of task flips and the net change. A headline score difference without paired task churn can hide large run-to-run variance.
 
 ## Phase 8: pass@k
 
@@ -278,4 +330,4 @@ Validate Harbor's pass-at-k output independently with `summarize_job.py`. It gro
 
 ## Troubleshooting routing
 
-Read [troubleshooting.md](references/troubleshooting.md) for Docker network exhaustion, setup download resets, timeout process leaks, Anthropic document blocks, Pi argv bugs, self-termination, unbounded subprocess waits, TTL expiry, server-load interpretation, partial jobs, and suspicious official-score gaps.
+Read [troubleshooting.md](references/troubleshooting.md) for Docker network exhaustion, setup download resets, timeout process leaks, content-block compatibility, Pi argv bugs, self-termination, unbounded subprocess waits, TTL expiry, runtime-image drift, partial and cancelled jobs, score cutoffs, artifact retention, and suspicious reference-score gaps.

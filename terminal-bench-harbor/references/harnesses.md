@@ -106,3 +106,5 @@ Pin what each harness can actually control:
 - Pi: thinking-level mapping; no stock Harbor temperature/top-p knobs.
 
 Do not claim that two runs isolate the agent harness if the API protocol, sampling, context limit, timeout policy, or server launch also changed.
+
+Treat reasoning-effort names as versioned prompt profiles, not universal ordinal settings. The same label can map to different injected text across a model revision, server profile, or harness release, while a different label may preserve a legacy prompt. Probe the effective request or rendered prompt, record the mapping, and compare prompt profiles before interpreting `low`, `high`, or `max` scores.

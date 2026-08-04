@@ -96,6 +96,48 @@ An EC2 CPU devbox uses ephemeral storage. Expiry can destroy incomplete job arti
 
 Harbor writes aggregate results incrementally. Completion requires a non-null `finished_at`, all trials completed, no running/pending/cancelled trials, and the driver exit. A partial run may already have reward lists and a mean; those are descriptive only.
 
+## A stopped run says every trial completed
+
+Harbor can finalize cancelled slots into `n_completed_trials` and include them in the aggregate mean's denominator. The file may therefore say 89/89 completed while reward lists contain fewer than 89 graded outcomes and `n_cancelled_trials` is nonzero.
+
+Use `scripts/summarize_job.py` to report graded reward records, cancellations, and the partial lower-to-upper range. Do not publish the post-cancellation mean as a benchmark score. Preserve the last watchdog snapshot because another task may complete between the cutoff decision and Harbor shutdown.
+
+## Stop when a target score becomes impossible
+
+Define the target and stopping policy before launch. Poll with:
+
+```bash
+python3 scripts/summarize_job.py JOB \
+  --target-passes TARGET \
+  --fail-if-target-unreachable
+```
+
+Exit 3 means the optimistic ceiling is below the target. Equality can still tie and is reachable. Other nonzero exits indicate malformed or unavailable state and must not stop the run.
+
+Run the watchdog detached from the control-plane transport. Log the timestamped pass, failure, graded, running, pending, retry, and error counts before signalling the validated Harbor driver PID. Keep its detached wrapper alive to record the exit status, and retain both the pre-stop snapshot and finalized cancelled artifact.
+
+## A rerun changed more than its job name
+
+Text diffs and config hashes alone do not prove equivalence. Render both resolved configs and run:
+
+```bash
+python3 scripts/compare_configs.py PRIOR/config.json RERUN/config.json
+```
+
+The command ignores top-level `job_name` and reports every remaining differing JSON path. Any additional difference requires an explicit comparison rationale or a new experiment axis.
+
+## Runtime image or checkout drift
+
+A local branch SHA, remote checkout SHA, container image tag, and running server revision are separate claims. Moving image tags and stale processes can serve code that differs from the intended checkout.
+
+Record the immutable image digest, read the revision from inside the runtime, capture the exact launch command, and probe the live API. For task-side failures, also record the Terminal-Bench environment image digest. A protocol error correlated with one content type is not enough evidence of a task-image failure; check HTTP status, server validation markers, task-container setup, and whether unaffected tasks use the same image.
+
+## Releasing benchmark resources
+
+Ephemeral CPU runners and per-devbox scratch are wiped on release. Archive aggregates, resolved configs, cutoff snapshots, and relevant logs first, then verify local or durable-storage hashes.
+
+Resolve exact devbox IDs and inspect current processes before release. Stop or release only dedicated resources for the completed benchmark; a shared server may belong to another project. Do not use a data-wipe option unless deletion of the persistent prefix was separately authorized. After release, confirm the exact entries disappear from the resource list.
+
 ## Trial-local `result.json` is invalid JSON
 
 Harbor redaction can insert a literal `[REDACTED]` rather than a quoted JSON string. Use the aggregate `result.json` for counts and rewards. Use `exception.txt`, session JSONL, agent logs, verifier `reward.txt`, `ctrf.json`, and test stdout for the failing trial.
@@ -114,6 +156,8 @@ Audit in this order:
 8. Per-task flips against a matched run.
 
 Do not attribute the entire gap to the model when the reference harness is unavailable or uses different sampling and tool policies.
+
+Repeat a surprising pass@1 result with a new job identity and a structurally equivalent config. Compare only tasks naturally graded in both jobs, report left-only and right-only passes, and separate net score movement from total task churn. Large bidirectional churn indicates stochastic variance even when the headline scores are close.
 
 ## Pass@16 looks unexpectedly high or low
 
