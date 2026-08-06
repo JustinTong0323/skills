@@ -2,15 +2,34 @@
 
 ## Dependency Boundary
 
-Use the unmodified NVIDIA Model Optimizer source at commit:
+Use the unmodified NVIDIA Model Optimizer source at a **verified snapshot commit**. The reference snapshot known to pass the full gate chain (structural, scale, deterministic smoke with a known-good control, and task-level accuracy + stop-rate) is:
 
 ```text
 87c9f8cf83021957d1a1a575c90c9a4eaaf7ef0c
 ```
 
+This commit is a snapshot, not a preference. The `modelopt_commit` field is part of the marker and manifest identity: the same command must produce the same checkpoint or be rejected as an identity mismatch. Do not track a moving branch such as `main`.
+
 Do not introduce a local Model Optimizer patch to make full-model FSDP export work. The accepted design avoids that failure mode by bounding each worker to one layer and one expert partition.
 
 Record the exact Python, PyTorch, CUDA, Transformers, Safetensors, and Model Optimizer versions. Disable user-site packages during conversion so an undeclared package cannot change the result.
+
+### Moving To A Different Snapshot
+
+Moving the snapshot is a new dependency identity. It is allowed, but it is not "edit a sha and resume". Any of these is a legitimate trigger:
+
+- An upstream fix lands that this pipeline depends on (for example, a fix in the unified-HF NVFP4 export path, a repaired `weight_scale` layout, or tighter exclusion of internal quantizer buffers).
+- An upstream streaming / disk-offload export path matures and replaces the pipeline's custom bounded exporter.
+- The runtime environment moves (a newer Transformers release on which a model family stops quantizing, or a known-good container image pulls a newer Model Optimizer).
+
+When moving:
+
+1. Pick a new explicit commit. Do not use a branch name or a floating tag.
+2. Diff the new commit against the current snapshot for anything touching `modelopt/torch/export/unified_export_hf*.py`, `modelopt/torch/quantization/config.py`, the NVFP4 quantizer paths, calibration algorithms, and expert-tensor rename handlers. Treat any change in these as a behavior change, not a refactor.
+3. Regenerate the manifest and rerun the full gate chain from scratch: real-weight dry run → full four-worker conversion → CPU assembly → structural and scale validation → deterministic smoke on both a known-good control and the target checkpoint → task accuracy + stop-rate.
+4. Reject any reuse of parts produced under the previous snapshot. The previous snapshot's identity is invalidated, not grandfathered.
+
+A snapshot move that only reaches "loads without error" is not validated. NVFP4 calibration or export behavior can shift silently between adjacent commits, and the failure mode this pipeline is designed to catch is exactly "structure passes while numerics drift".
 
 ## Quantized Scope
 

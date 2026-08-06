@@ -15,7 +15,7 @@ Obtain or discover:
 
 - Read-only unified Hugging Face BF16 checkpoint with `config.json` and `model.safetensors.index.json`.
 - Compatible Model Optimizer quantized config whose established exclusion list must be preserved.
-- NVIDIA Model Optimizer checkout at commit `87c9f8cf83021957d1a1a575c90c9a4eaaf7ef0c`.
+- NVIDIA Model Optimizer checkout at a verified snapshot commit. The reference snapshot is `87c9f8cf83021957d1a1a575c90c9a4eaaf7ef0c`; moving to any other commit is a new identity and requires rerunning the full gate chain (see [conversion-contract.md](references/conversion-contract.md#dependency-boundary)).
 - Four GPUs visible to four independent single-GPU workers.
 - Staging and final output directories on the same filesystem.
 - Enough storage for source staging, immutable routed parts, BF16 assembly shards, and validation reads.
@@ -58,7 +58,7 @@ Quantize one real expert from one real layer before scheduling the full conversi
 - Match the expected tensor names, shapes, and dtypes.
 - Produce finite, strictly positive scales.
 
-Do not proceed if any gate fails. Random Gaussian hidden states are not a valid substitute for representative routed-MoE inputs; they can produce a structurally valid checkpoint with badly saturated activation scales.
+Do not proceed if any gate fails. Random Gaussian hidden states are not a valid substitute for representative routed-MoE inputs; they can produce a structurally valid checkpoint with badly saturated activation scales. The concrete calibration recipe in the reference contract (deterministic token IDs indexing source embedding rows, then the source layer's post-attention RMSNorm) was validated end-to-end on the reference model family. When targeting a different model family, re-derive and re-validate that the chosen token window is representative of real routed-MoE input magnitudes before trusting it.
 
 ### 3. Run Four Independent Workers
 
@@ -87,7 +87,7 @@ Run all gates in [validation-and-release.md](references/validation-and-release.m
 3. Unchanged non-routed and MTP metadata.
 4. Finite, strictly positive scale scan.
 5. SGLang load, backend initialization, health, and deterministic finite-output smoke.
-6. Stop-rate and task-accuracy evaluation unless the user explicitly waives it.
+6. Stop-rate and task-accuracy evaluation unless the user explicitly waives it. A waiver is itself part of the release decision and must be recorded in the completion report (see [validation-and-release.md](references/validation-and-release.md#task-evaluation)).
 
 A successful load is not a successful conversion. A finite but wrong or non-terminating response also fails the behavioral gate.
 
@@ -107,7 +107,7 @@ Report:
 - Part/marker, shard, tensor, and dtype counts derived from the manifest.
 - Structural and scale validator results.
 - Runtime topology, backend selection, health result, output, finish reason, and finite-logprob count.
-- Accuracy and stop-rate results, or the user's explicit waiver.
+- Accuracy and stop-rate results. If the user waived a dataset, record the dataset, the scope of the completed smaller result, the waiver itself, and who authorized it — do not let a waived line read as "passed".
 - Final private repository, revision, visibility, inventory, and metadata hashes.
 - Any remaining runtime, quality, or portability risks.
 

@@ -54,6 +54,8 @@ python3 -m sglang.launch_server \
   --tensor-parallel-size <tp>
 ```
 
+`flashinfer_cutlass` and `flashinfer_trtllm` are example values known to work on Blackwell-class hardware with recent FlashInfer. They are not portable defaults — Hopper-class GPUs, older FlashInfer revisions, or model families without a tuned TRT-LLM MoE path need a different combination. Select these backends against your own hardware and FlashInfer version, not by copying from another cluster.
+
 Use topology, attention backend, memory, offload, graph, and distributed flags appropriate for the hardware and SGLang revision. Do not carry flags from another cluster without validating them.
 
 Before sending a request, require:
@@ -138,3 +140,8 @@ Delete a superseded private repository only when the user explicitly authorizes 
 | Load passes but output is wrong | Calibration distribution or runtime state corruption | Compare real activation range and run known-good control |
 | Correct answer never stops | EOS/runtime corruption or bad checkpoint behavior | Fail the gate; inspect raw response and stop metrics |
 | Remote byte total differs | Header accounting, missing files, or malformed attributes | Compare exact inventory and metadata hashes before deletion |
+| Multi-node load hangs partway | `LOCAL_SIZE` overwritten to global TP, so each node prefetches only a fraction of shards | Verify each rank's loaded-shard count, not just rank-0 health; pin `LOCAL_SIZE` to the per-node rank count |
+| Multi-node load far slower than expected | Checkpoint prefetch threads exceed host page cache | Measure page-cache headroom and reduce prefetch threads (one per local rank is a safe starting point) |
+| Pod evicted mid-validation on a shared cluster | Shared-filesystem ephemeral-storage quota hit while streaming a large checkpoint (observed on a shared-filesystem mount with a per-node eviction threshold) | Stream the checkpoint to local NVMe and remove the shared mount from the hot path before model load; treat the eviction as a platform issue |
+| Checkpoint does not fit GPU memory even at high TP | NVFP4 experts-only checkpoint of this class is still of order 1.4 TB and does not fit on four Blackwell-class GPUs | Plan `--cpu-offload-gb` (of order 100 GiB per rank) as a hard requirement, and verify offloaded behavior with the known-good control — CPU offload is a common silent-corruption vector |
+| "Passed" on a new Model Optimizer commit but numerics drifted | Calibration or export behavior changed between adjacent upstream commits while structure stayed compatible | Never validate a snapshot move by load alone; rerun the full gate chain (dry run → assembly → structural → scale → control + target smoke → accuracy + stop-rate) and reject any reuse of parts from the previous snapshot |

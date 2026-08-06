@@ -154,3 +154,12 @@ The assembler must:
 10. Atomically rename staging to the final output on the same filesystem.
 
 If the target loader ignores nested paths in the index, create collision-checked root-level hard links and atomically rewrite the index to basenames. Verify inode identity before the rewrite. Do not duplicate terabytes of payload merely to change layout.
+
+## Common Multi-Node Loading Pitfalls
+
+These were each observed to block a two-node TP8 launch or to silently corrupt its shard coverage. Check them before blaming NCCL or the network:
+
+- `LOCAL_SIZE` must reflect the per-node rank count, not global TP. Some SGLang revisions overwrite an externally supplied `LOCAL_SIZE` with global TP, causing each node to prefetch only `TP_local / TP_global` of the total shards. On a 2-node TP8 launch this made each node fetch only half of the shards and the load appeared to hang while ranks on the other node were missing data.
+- Checkpoint prefetch threads must fit inside the host page cache. On one node, 4 prefetch threads per local rank outran the available page cache and thrashed I/O; one thread per local rank was sufficient. Measure page-cache headroom, do not guess.
+- A long runner-rank imbalance is not the same as a deadlock. When one node reads from local NVMe and the other from a slow shared filesystem, per-rank load completion can differ by tens of minutes. Raise the post-load barrier (for SGLang, `SGLANG_UNBALANCED_MODEL_LOADING_TIMEOUT_S`) high enough for the slow node; do not kill the fast ranks.
+- Verify each rank actually loaded its shard set. Rank-0 health alone cannot prove the other 7 ranks finished.
