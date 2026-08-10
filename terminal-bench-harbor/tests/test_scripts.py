@@ -19,6 +19,7 @@ normalized_config = harbor_results.normalized_config
 summarize = harbor_results.summarize
 summarize_eval = harbor_results.summarize_eval
 task_outcomes = harbor_results.task_outcomes
+compare_jobs = __import__("compare_jobs")
 
 
 class HarborResultsTests(unittest.TestCase):
@@ -59,6 +60,23 @@ class HarborResultsTests(unittest.TestCase):
         self.assertTrue(outcomes["task-a"]["passed"])
         self.assertEqual(outcomes["task-a"]["attempts"], 2)
         self.assertFalse(outcomes["task-b"]["passed"])
+
+    def test_fractional_reward_is_not_a_pass(self) -> None:
+        eval_result = {
+            "reward_stats": {
+                "reward": {
+                    "1.0": ["task-a__one"],
+                    "0.5": ["task-b__one"],
+                }
+            }
+        }
+        outcomes = task_outcomes(eval_result)
+        summary = summarize_eval("eval", eval_result, 2, 1, True, None)
+        self.assertTrue(outcomes["task-a"]["passed"])
+        self.assertFalse(outcomes["task-b"]["passed"])
+        self.assertEqual(summary["passed_trials"], 1)
+        self.assertEqual(summary["failed_trials"], 1)
+        self.assertEqual(summary["pass_at_attempts"], 0.5)
 
     def test_complete_summary_reports_pass_at_attempts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -117,6 +135,9 @@ class HarborResultsTests(unittest.TestCase):
                 "0.0": ["task-b__one", "task-c__one"],
             }
         }
+        result["stats"]["evals"]["agent__model__dataset"]["exception_stats"] = {
+            "CancelledError": ["task-d__one"]
+        }
         with tempfile.TemporaryDirectory() as directory:
             job = Path(directory)
             (job / "result.json").write_text(json.dumps(result))
@@ -131,6 +152,22 @@ class HarborResultsTests(unittest.TestCase):
         self.assertEqual(eval_summary["ungraded_trials"], 1)
         self.assertEqual(eval_summary["optimistic_successful_tasks"], 2)
         self.assertFalse(eval_summary["target_reachable"])
+
+    def test_terminal_error_consumes_an_attempt(self) -> None:
+        value = summarize_eval(
+            "eval",
+            {
+                "reward_stats": {"reward": {"1.0": ["task-a__one"]}},
+                "exception_stats": {"RuntimeError": ["task-b__one"]},
+            },
+            expected_tasks=2,
+            attempts=1,
+            complete=False,
+            target_passes=2,
+        )
+        self.assertEqual(value["exhausted_failed_tasks"], 1)
+        self.assertEqual(value["optimistic_successful_tasks"], 1)
+        self.assertFalse(value["target_reachable"])
 
     def test_met_target_is_reachable_without_expected_task_count(self) -> None:
         value = summarize_eval(
@@ -199,6 +236,21 @@ class HarborResultsTests(unittest.TestCase):
             )
         self.assertEqual(process.returncode, 0)
         self.assertIn("Equivalent: True", process.stdout)
+
+    def test_compare_jobs_reports_missing_configs_as_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            left = root / "left"
+            right = root / "right"
+            left.mkdir()
+            right.mkdir()
+            (left / "result.json").write_text(json.dumps(self.result()))
+            (right / "result.json").write_text(json.dumps(self.result()))
+            value = compare_jobs.compare(
+                str(left), str(right), None, None, allow_partial=False
+            )
+        self.assertEqual(value["config"]["available"], {"left": False, "right": False})
+        self.assertIsNone(value["config"]["equivalent"])
 
 
 class RenderConfigTests(unittest.TestCase):

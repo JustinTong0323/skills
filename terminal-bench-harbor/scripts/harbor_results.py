@@ -45,6 +45,10 @@ def reward_trials(eval_result: dict[str, Any]) -> list[tuple[str, float]]:
     return pairs
 
 
+def is_passing_reward(reward: float) -> bool:
+    return reward == 1
+
+
 def task_outcomes(eval_result: dict[str, Any]) -> dict[str, dict[str, Any]]:
     outcomes: dict[str, dict[str, Any]] = {}
     for trial, reward in reward_trials(eval_result):
@@ -52,10 +56,23 @@ def task_outcomes(eval_result: dict[str, Any]) -> dict[str, dict[str, Any]]:
         entry = outcomes.setdefault(
             task, {"passed": False, "attempts": 0, "rewards": []}
         )
-        entry["passed"] = entry["passed"] or reward > 0
+        entry["passed"] = entry["passed"] or is_passing_reward(reward)
         entry["attempts"] += 1
         entry["rewards"].append(reward)
     return outcomes
+
+
+def task_attempt_counts(eval_result: dict[str, Any]) -> dict[str, int]:
+    trial_names = {trial for trial, _ in reward_trials(eval_result)}
+    for exception_type, trials in eval_result.get("exception_stats", {}).items():
+        if exception_type != "CancelledError":
+            trial_names.update(trials)
+
+    counts: dict[str, int] = {}
+    for trial in trial_names:
+        task = trial_task(trial)
+        counts[task] = counts.get(task, 0) + 1
+    return counts
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -117,14 +134,15 @@ def summarize_eval(
 ) -> dict[str, Any]:
     pairs = reward_trials(eval_result)
     outcomes = task_outcomes(eval_result)
-    passed_trials = sum(reward > 0 for _, reward in pairs)
-    failed_trials = sum(reward <= 0 for _, reward in pairs)
+    attempt_counts = task_attempt_counts(eval_result)
+    passed_trials = sum(is_passing_reward(reward) for _, reward in pairs)
+    failed_trials = sum(not is_passing_reward(reward) for _, reward in pairs)
     successful_tasks = sum(entry["passed"] for entry in outcomes.values())
     denominator = expected_tasks or len(outcomes)
     lower_bound = successful_tasks / denominator if denominator else None
     exhausted_failures = sum(
-        not entry["passed"] and entry["attempts"] >= attempts
-        for entry in outcomes.values()
+        not outcomes.get(task, {}).get("passed", False) and count >= attempts
+        for task, count in attempt_counts.items()
     )
     optimistic_successful_tasks = (
         expected_tasks - exhausted_failures if expected_tasks is not None else None

@@ -177,6 +177,8 @@ Do not attribute the entire gap to the model when the reference harness is unava
 
 Repeat a surprising pass@1 result with a new job identity and a structurally equivalent config. Compare only tasks naturally graded in both jobs, report left-only and right-only passes, and separate net score movement from total task churn. Large bidirectional churn indicates stochastic variance even when the headline scores are close.
 
+If either job lacks `config.json`, report configuration equivalence as unknown. Two missing configuration artifacts are not evidence that the runs were equivalent.
+
 ## Pass@16 looks unexpectedly high or low
 
 Verify that the job contains exactly 89 × 16 completed trials and no cancellations. Per-trial mean is not pass@16. Compute the union by canonical task name and require at least one reward-1 attempt. Use `scripts/summarize_job.py` and reconcile it with Harbor's own `pass_at_k` field.

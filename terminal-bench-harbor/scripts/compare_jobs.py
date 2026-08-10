@@ -20,8 +20,8 @@ def compare(
     right_eval_key: str | None,
     allow_partial: bool,
 ) -> dict:
-    left_result, left_config, _ = load_job(left_path)
-    right_result, right_config, _ = load_job(right_path)
+    left_result, left_config, left_result_path = load_job(left_path)
+    right_result, right_config, right_result_path = load_job(right_path)
     if not allow_partial and (
         not is_complete(left_result) or not is_complete(right_result)
     ):
@@ -56,9 +56,17 @@ def compare(
         "missing_right": sorted(set(left) - set(right)),
     }
     ignored_config_keys = {"job_name"}
-    config_diff = config_differences(
-        normalized_config(left_config, ignored_config_keys),
-        normalized_config(right_config, ignored_config_keys),
+    config_available = {
+        "left": (left_result_path.parent / "config.json").exists(),
+        "right": (right_result_path.parent / "config.json").exists(),
+    }
+    config_diff = (
+        config_differences(
+            normalized_config(left_config, ignored_config_keys),
+            normalized_config(right_config, ignored_config_keys),
+        )
+        if all(config_available.values())
+        else []
     )
     return {
         "left": {"job_name": left_config.get("job_name"), "eval": left_key},
@@ -68,7 +76,8 @@ def compare(
             "right": is_complete(right_result),
         },
         "config": {
-            "equivalent": not config_diff,
+            "available": config_available,
+            "equivalent": not config_diff if all(config_available.values()) else None,
             "ignored_keys": sorted(ignored_config_keys),
             "different_paths": config_diff,
         },
@@ -81,10 +90,16 @@ def print_human(result: dict) -> None:
     print(f"Left: {result['left']['job_name']} ({result['left']['eval']})")
     print(f"Right: {result['right']['job_name']} ({result['right']['eval']})")
     config = result["config"]
-    print(
-        "Config equivalent ignoring "
-        f"{', '.join(config['ignored_keys'])}: {config['equivalent']}"
-    )
+    if config["equivalent"] is None:
+        missing = ", ".join(
+            side for side, available in config["available"].items() if not available
+        )
+        print(f"Config equivalent: unknown (missing config.json: {missing})")
+    else:
+        print(
+            "Config equivalent ignoring "
+            f"{', '.join(config['ignored_keys'])}: {config['equivalent']}"
+        )
     if config["different_paths"]:
         print("Config differences: " + ", ".join(config["different_paths"]))
     for name in (
