@@ -4,33 +4,18 @@ Kimi Code is an optional DeepSWE agent. Do not make it a prerequisite for genera
 
 ## Choose the profile
 
-- General Kimi Code evaluation: Harbor or Pier is valid; report the selected backend.
+- Current npm Kimi Code evaluation: use Pier with the bundled adapter.
 - KVV DeepSWE profile: use Pier and Kimi Code 0.23.6 or newer because that is the published KVV contract.
 
 Pin the package version. Do not use floating `latest` for a scored run.
 
-## Harbor built-in adapter
+## Harbor naming caveat
 
-Harbor 0.20.0 includes `kimi-code`:
-
-```bash
-harbor run --path deep-swe/tasks/abs-module-cache-flags \
-  --agent kimi-code \
-  --agent-kwarg version=0.23.6 \
-  --model MODEL_ID \
-  --allow-agent-host MODEL_ENDPOINT_HOST \
-  --agent-env KIMI_MODEL_NAME=MODEL_ID \
-  --agent-env KIMI_MODEL_API_KEY="$MODEL_API_KEY" \
-  --agent-env KIMI_MODEL_BASE_URL="$MODEL_BASE_URL" \
-  --agent-env KIMI_MODEL_PROVIDER_TYPE=openai \
-  --job-name deepswe-kimi-smoke \
-  --jobs-dir "$DEEPSWE_JOBS" \
-  --yes
-```
-
-Use provider type `kimi` for the Kimi protocol and `openai` for a compatible gateway when supported by the selected Kimi Code version. Harbor's `--model` records trial metadata; `KIMI_MODEL_NAME` controls the model Kimi Code calls.
-
-The Harbor adapter intentionally reports `SUPPORTS_ATIF = False` for Kimi Code. Preserve its raw stream JSON output instead of claiming a lossy conversion is a complete ATIF trajectory.
+Harbor 0.20.0 exposes `--agent kimi-cli`, which installs the legacy Python
+`kimi-cli` package. It does not expose the current npm
+`@moonshot-ai/kimi-code` adapter described in this reference. Harbor remains a
+valid DeepSWE backend for its compatible agents, but its `kimi-cli` results are
+not interchangeable with Kimi Code results.
 
 ## Pier custom adapter
 

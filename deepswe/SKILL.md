@@ -15,7 +15,7 @@ Run DeepSWE without conflating the task corpus, orchestration backend, agent har
 | Reproduce the DeepSWE public workflow | Pier | `mini-swe-agent` |
 | Run the current task format locally | Harbor 0.20.0 or Pier 0.3.0 | Any compatible agent |
 | Run the Kimi Vendor Verifier profile | Pier | Kimi Code 0.23.6 or newer |
-| Evaluate Kimi Code outside the KVV profile | Harbor or Pier | Kimi Code |
+| Evaluate current npm Kimi Code outside the KVV profile | Pier | Kimi Code |
 
 Pier remains the canonical comparison path because DeepSWE says its published leaderboard scores were produced with Pier, `mini-swe-agent`, and Modal. Harbor 0.20.0 is a supported alternative: all 113 task configs load with separate verifier environments, collect hooks, and agent network isolation. Do not label a Harbor result as a strict reproduction of a Pier leaderboard result.
 
@@ -106,11 +106,11 @@ harbor --version
 
 Treat these as the validated versions, not floating requirements. Re-run the task audit and both smoke gates before accepting a newer version.
 
-## Run two smoke gates
+## Run smoke gates
 
 Use a named task such as `abs-module-cache-flags` for both gates.
 
-First run the oracle to validate image startup, artifact collection, separate verification, and grading without calling a model:
+An oracle run can validate image startup and verifier execution without calling a model:
 
 ```bash
 pier run -p deep-swe/tasks/abs-module-cache-flags \
@@ -130,7 +130,11 @@ harbor run --path deep-swe/tasks/abs-module-cache-flags \
   --yes
 ```
 
-Require reward 1 and no setup, collection, or verifier exception.
+Do not use the built-in oracle as a reward or patch-collection gate for
+DeepSWE v1.1. Pier 0.3.0's oracle does not commit the reference changes before
+the task's `git diff BASE HEAD` collect hook, so it can finish with an empty
+artifact set and reward 0. Preserve and report that result rather than treating
+it as a solved task. The real-agent smoke below is mandatory.
 
 Then run one real agent task. For the canonical `mini-swe-agent` path with Pier:
 
