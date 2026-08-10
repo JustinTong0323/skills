@@ -12,13 +12,25 @@ docker info
 cat /etc/docker/daemon.json
 ```
 
-On a dedicated runner, configure a larger default pool before the run:
+On a dedicated runner, configure a larger default pool before the run. The example range is illustrative; choose a range that does not overlap any runner, model endpoint, VPN, tunnel, or service route.
 
 ```json
 {"default-address-pools":[{"base":"172.30.0.0/16","size":24}]}
 ```
 
 Restarting Docker affects every container. Do not do it on a shared runner without explicit authority. Jobs that already recorded network-creation failures are contaminated; start a new job after correction.
+
+## Image pull or environment build failures at launch
+
+Launching many cold trials at once can overload registry access, Docker builds, disk I/O, or inode capacity. A reward-zero slot with a pull or build exception is infrastructure evidence, not model evidence.
+
+Check `docker system df`, filesystem space and inodes, registry reachability, and the trial environment logs. Warm or validate images in bounded batches, then use a new job name. Do not reinterpret the contaminated aggregate as a clean score.
+
+## Endpoint works on the host but not in task containers
+
+Host-side probes do not exercise Docker routing. Test the exact API base from a container attached to the same network class as Harbor tasks. If a tunnel or port forward is required, run it independently of the control connection, persist its PID and logs, and monitor both process liveness and container-side HTTP reachability.
+
+Do not hardcode a Docker gateway address from another machine. Resolve a routable address on the current runner and record the route as part of benchmark identity.
 
 ## Agent setup download reset
 
@@ -62,6 +74,12 @@ Input tag 'document' ... does not match any of the expected tags
 
 This is an Anthropic API compatibility failure. It is not model reasoning failure, verifier failure, or agent timeout. Keep the stock result unchanged and test server support separately.
 
+## Claude Code effort passes smoke but fails later
+
+The configured effort label is not necessarily the only value emitted by the agent. A run configured for `max` can still exercise a related value such as `high`, and the server or model template may accept one while rejecting the other.
+
+Inspect agent requests and server validation errors, probe every observed effort value after each server restart, and repeat the set at intended concurrency. A one-task smoke that covered only one value is insufficient. Fixes to effort normalization change the runtime identity and require a fresh smoke and job.
+
 ## Pi exits before a model request on a leading dash
 
 Harbor 0.20.0 appends the escaped instruction directly after Pi flags without `--`. A task instruction beginning with `- ` becomes an unknown option. Confirm the instruction and agent log; classify it as a stock-adapter harness failure.
@@ -74,7 +92,7 @@ terminal-bench/nginx-request-logging
 
 ## Pi exits 137 after `pkill -f`
 
-The full task instruction is present in the long-lived Pi argv. If the agent runs `pkill -9 -f NAME` and `NAME` appears in the instruction, Pi matches and kills itself. Confirm process argv and absence of an EC2/kernel OOM event before classifying it.
+The full task instruction is present in the long-lived Pi argv. If the agent runs `pkill -9 -f NAME` and `NAME` appears in the instruction, Pi matches and kills itself. Confirm process argv and absence of a host/kernel OOM event before classifying it.
 
 ## High GPU utilization
 
@@ -88,9 +106,9 @@ GPU utilization near 100% means the server is doing work, not necessarily that i
 
 High utilization with zero queue and successful responses is healthy. Growing queue depth, request timeouts, or stalled completion count indicates saturation.
 
-## Runner TTL expires
+## Runner or server lease expires
 
-An EC2 CPU devbox uses ephemeral storage. Expiry can destroy incomplete job artifacts even when the GPU server remains healthy. Before pass@1, provision enough time for the slowest tail. Before pass@16, budget for 1,424 trials and extend both runner and server TTL. Verify the new expiry after every extension.
+An ephemeral CPU runner can lose incomplete job artifacts even when the GPU server remains healthy. Before pass@1, provision enough time for the slowest tail. Before pass@16, budget for 1,424 trials and extend both CPU and GPU resource leases. Verify the new expiry after every extension.
 
 ## `result.json` exists but the run is not done
 
@@ -134,9 +152,9 @@ Record the immutable image digest, read the revision from inside the runtime, ca
 
 ## Releasing benchmark resources
 
-Ephemeral CPU runners and per-devbox scratch are wiped on release. Archive aggregates, resolved configs, cutoff snapshots, and relevant logs first, then verify local or durable-storage hashes.
+Ephemeral CPU runners and GPU-server scratch may be wiped on release. Archive aggregates, resolved configs, cutoff snapshots, and relevant logs first, then verify local or durable-storage hashes.
 
-Resolve exact devbox IDs and inspect current processes before release. Stop or release only dedicated resources for the completed benchmark; a shared server may belong to another project. Do not use a data-wipe option unless deletion of the persistent prefix was separately authorized. After release, confirm the exact entries disappear from the resource list.
+Resolve exact resource IDs and inspect current processes before release. Stop or release only dedicated resources for the completed benchmark; a shared server may belong to another project. Do not use a data-wipe option unless deletion of persistent storage was separately authorized. After release, confirm the exact resources are gone.
 
 ## Trial-local `result.json` is invalid JSON
 

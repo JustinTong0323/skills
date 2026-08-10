@@ -26,6 +26,7 @@ def terminus_agent(args: argparse.Namespace, openai_base: str) -> dict[str, Any]
     return {
         "name": "terminus-2",
         "model_name": prefixed_model("openai", args.model),
+        "env": {"OPENAI_API_KEY": args.api_key},
         "kwargs": {
             "api_base": openai_base,
             "reasoning_effort": args.reasoning_effort,
@@ -56,6 +57,7 @@ def claude_agent(args: argparse.Namespace, server_root: str) -> dict[str, Any]:
         "env": {
             "ANTHROPIC_BASE_URL": server_root,
             "ANTHROPIC_API_KEY": args.api_key,
+            "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
             "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(args.max_output_tokens),
         },
     }

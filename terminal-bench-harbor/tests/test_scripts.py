@@ -241,6 +241,7 @@ class RenderConfigTests(unittest.TestCase):
             job["agents"][0]["kwargs"]["api_base"], "http://server:30000/v1"
         )
         self.assertEqual(job["agents"][0]["model_name"], "openai/org/model")
+        self.assertEqual(job["agents"][0]["env"]["OPENAI_API_KEY"], "EMPTY")
 
     def test_claude_uses_server_root(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -248,6 +249,7 @@ class RenderConfigTests(unittest.TestCase):
         self.assertEqual(
             job["agents"][0]["env"]["ANTHROPIC_BASE_URL"], "http://server:30000"
         )
+        self.assertEqual(job["agents"][0]["env"]["CLAUDE_CODE_ATTRIBUTION_HEADER"], "0")
 
     def test_pi_writes_models_and_mount(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

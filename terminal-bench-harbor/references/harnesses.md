@@ -22,6 +22,9 @@ Use the OpenAI `/v1` base. The renderer produces the equivalent of:
 {
   "name": "terminus-2",
   "model_name": "openai/MODEL_ID",
+  "env": {
+    "OPENAI_API_KEY": "EMPTY"
+  },
   "kwargs": {
     "api_base": "http://SERVER:30000/v1",
     "reasoning_effort": "max",
@@ -58,12 +61,15 @@ Use the Anthropic server root, not the OpenAI `/v1` base:
   "env": {
     "ANTHROPIC_BASE_URL": "http://SERVER:30000",
     "ANTHROPIC_API_KEY": "EMPTY",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "393216"
   }
 }
 ```
 
-Claude Code owns its sampling behavior and may cap effective context or output below the environment values. Record the CLI version from the trajectory. Its `Read` tool can emit Anthropic `document` blocks for PDFs; the server must support those blocks or the run can fail with HTTP 400.
+Claude Code owns its sampling behavior and may cap effective context or output below the environment values. `CLAUDE_CODE_ATTRIBUTION_HEADER=0` avoids changing otherwise stable conversation prefixes and is required for comparable prefix-cache behavior. Record the CLI version and effective limits from the trajectory. Its `Read` tool can emit Anthropic `document` blocks for PDFs; the server must support those blocks or the run can fail with HTTP 400.
+
+Do not assume `reasoning_effort=max` produces only `max` requests. Agent versions can emit related values such as `high` during the same run. Probe every value observed in a smoke against the live Anthropic endpoint, inspect server logs for template or validation errors, and repeat the probe at intended concurrency before a large run.
 
 Agent setup downloads the Claude CLI inside task environments. A setup download reset is infrastructure failure; retry only the affected setup in a new auditable job or through an explicitly scoped infrastructure retry policy.
 

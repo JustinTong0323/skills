@@ -1,7 +1,7 @@
 ---
 name: terminal-bench-harbor
 description: "Run Terminal-Bench 2.1 with Harbor against a local or remote SGLang/OpenAI/Anthropic-compatible endpoint. Use whenever the user mentions Terminal-Bench, TB2.1, Harbor evaluation, Terminus-2, Claude Code or Pi as a Harbor harness, pass@1/pass@k, or asks to benchmark an agentic model in Docker terminal tasks. Covers runner sizing, endpoint preflight, reproducible configs, smoke gates, detached execution, score-ceiling monitoring, completion audits, harness comparison, and failure attribution."
-version: 1.1.0
+version: 1.2.0
 ---
 
 # Terminal-Bench with Harbor
@@ -18,14 +18,14 @@ Run Terminal-Bench through Harbor without conflating model quality, agent-harnes
 | Claude Code | Anthropic Messages harness with its own tool loop and sampling policy |
 | Pi | OpenAI Completions harness configured through a mounted `models.json` |
 | SGLang | Model server; keep its revision and launch recipe fixed across harness comparisons |
-| EC2 CPU devbox | Harbor/Docker runner; keep it separate from the GPU server |
+| CPU Docker machine | Harbor/Docker runner; keep it separate from the GPU model server |
 
 ## Required information
 
 Gather or discover these before writing a config:
 
 1. Harbor runner location and whether it is dedicated or shared.
-2. Host-visible API base URL. A runner must reach it directly; `localhost` inside a task container is not the runner or GPU server.
+2. Container-visible API base URL. A task container must reach it directly; `localhost` inside that container is not the CPU runner or GPU server.
 3. Served model ID, context window, and maximum output tokens.
 4. Agent harness: `terminus-2`, `claude-code`, or `pi`.
 5. Reasoning mode and sampling settings supported by that harness.
@@ -33,7 +33,7 @@ Gather or discover these before writing a config:
 7. Agent-timeout and retry policy. These change evaluation semantics and must never be silently changed.
 8. Dataset ref. Pin the resolved digest instead of relying on `latest` for a scored run.
 9. Baseline or target score, and whether an optimistic score ceiling may stop the run.
-10. Durable artifact destination and which dedicated resources should be released afterward.
+10. Durable artifact destination and which dedicated CPU/GPU resources should be released afterward.
 
 For the 89-task TB2.1 package used in the validated Harbor 0.20.0 run:
 
@@ -66,21 +66,22 @@ curl -fsS "$OPENAI_BASE/models"
 curl -fsS -o /dev/null -w '%{http_code}\n' "$SERVER_ROOT/health"
 ```
 
-Probe the actual reasoning and tool-call contract with a small request before Harbor. Keep the model-specific reasoning parser, tool parser, context length, quantization, parallelism, and speculative algorithm unchanged during a harness A/B. Record the runtime image digest and the code revision reported inside the running server; a local checkout SHA does not prove what the endpoint is serving.
+Probe the actual reasoning and tool-call contract with a small request before Harbor. For Anthropic-compatible endpoints, exercise every effort value the selected agent version may emit, not only the configured headline value. Keep the model-specific reasoning parser, tool parser, context length, quantization, parallelism, and speculative algorithm unchanged during a harness A/B. Record the runtime image digest and the code revision reported inside the running server; a local checkout SHA does not prove what the endpoint is serving. After any runtime patch or restart, repeat the live probes and smoke against the new process.
 
 Model-specific launch recipes are part of benchmark identity. Do not substitute a different speculative algorithm, draft model, quantization path, or parser because the replacement appears functionally similar.
 
 ## Phase 1: provision and preflight the Harbor runner
 
-Use a dedicated Docker-capable CPU runner when possible. Observed sizing for local Harbor Docker trials:
+Use a dedicated Docker-capable CPU machine when possible. Observed starting points for local Harbor Docker trials:
 
-| Concurrency | Practical runner |
+| Concurrency | CPU runner starting point |
 |---|---|
-| 8-16 | `c7i.4xlarge`, 16 vCPU / 32 GiB |
-| 16-24 | `m7i.8xlarge`, 32 vCPU / 128 GiB |
-| 32 | `r7i.12xlarge`, 48 vCPU / 384 GiB |
+| 8-16 | 16 vCPU / 32 GiB |
+| 16-24 | 32 vCPU / 128 GiB |
+| 32 | 48 vCPU; size memory from task workload |
+| 64 | 128 vCPU; validate Docker and endpoint capacity before launch |
 
-At c32, memory was not the limiting resource: the observed first wave used about 4.5 GiB while load reached 37 on 48 vCPU. Avoid a 128-vCPU/1-TiB runner unless another workload needs it. Use a 1-TB disk for images, task layers, and retained artifacts.
+CPU demand scales with concurrent task setup, agent processes, and verifiers; memory demand is task-dependent and may be much lower. Use a 1-TB disk for images, task layers, and retained artifacts. Treat the table as a preflight baseline, then measure the smoke and first wave rather than assuming a machine class is sufficient.
 
 Check the runner:
 
@@ -89,6 +90,8 @@ harbor --version
 docker version
 docker info
 df -h / /var/lib/docker
+df -ih / /var/lib/docker
+docker system df
 docker ps
 ```
 
@@ -104,7 +107,11 @@ Harbor creates one Docker Compose network per active task. An unmodified daemon 
 {"default-address-pools":[{"base":"172.30.0.0/16","size":24}]}
 ```
 
-Changing `/etc/docker/daemon.json` and restarting Docker disrupts existing containers. Inspect first and obtain authority when the runner is shared. A c32 run is not validated until the host can create and delete at least 40 probe networks and then hold 32 real task networks.
+Choose a pool that does not overlap the runner, model endpoint, VPN, tunnel, or service routes. Changing `/etc/docker/daemon.json` and restarting Docker disrupts existing containers. Inspect first and obtain authority when the runner is shared. Before launch, prove the daemon can create and delete more networks than the requested concurrency; validated checks used 40 probes for c32 and 80 for c64. Then verify an attached probe container can reach the exact model endpoint. A host-side `curl` does not prove task-container reachability.
+
+If the endpoint depends on a tunnel or port-forward process, detach it from the control connection, record its PID and log, and monitor it as part of the run. Use an address routable from task containers instead of assuming a particular Docker bridge gateway.
+
+High concurrency can turn cold image pulls and environment builds into an infrastructure failure wave. Warm or validate task images in bounded batches, check registry access, disk space, and inodes, and require a clean first wave before treating the full run as model evidence.
 
 ## Phase 2: render a reproducible Harbor config
 
@@ -186,11 +193,13 @@ The smoke must prove all of these:
 - artifact collection and verifier execution;
 - reward 1 with no agent, API, environment, or verifier exception.
 
-A direct API probe alone does not authorize the 89-task run.
+A direct API probe alone does not authorize the 89-task run. Inspect the smoke trajectory for the actual agent version, effective context/output limits, and emitted reasoning values; configured environment variables are not proof that the agent honored them.
+
+For concurrency above the previously validated level, add a capacity gate before the full run. Send concurrent protocol-level requests covering the configured effort and related values the agent version may emit, then verify every response and stop reason. Use a separate Harbor job to exercise image setup, Docker networks, the endpoint route, and the model queue together; require it to finish cleanly before creating the full-run job.
 
 ## Phase 4: start the full run detached
 
-Long `rx devbox run` or SSH commands can die with the transport. Start Harbor in a detached session on the runner and write a PID, log, and exit-status file. Never use the existence of `result.json` as the done signal; Harbor writes it incrementally.
+Long control-plane or SSH commands can die with the transport. Start Harbor in a detached session on the CPU runner and write a PID, log, and exit-status file. Never use the existence of `result.json` as the done signal; Harbor writes it incrementally.
 
 ```bash
 setsid bash -lc '
@@ -228,6 +237,8 @@ ps -p "$(cat /home/ubuntu/tb21/RUN.pid)" -o pid=,stat=,etime=,cmd=
 docker ps --format '{{.Names}}|{{.Status}}'
 find /home/ubuntu/tb21/jobs/RUN -mindepth 2 -maxdepth 2 -name result.json | wc -l
 curl -fsS -o /dev/null -w '%{http_code}\n' "$SERVER_ROOT/health"
+df -h / /var/lib/docker
+df -ih / /var/lib/docker
 ```
 
 If the user authorized a target-based cutoff, inspect the optimistic ceiling rather than Harbor's incremental mean:
@@ -250,7 +261,8 @@ When progress stops, classify before acting:
 3. Are agent logs changing?
 4. Is the task waiting on a child process, model request, or verifier?
 5. Is SGLang healthy, serving, queued, or emitting errors?
-6. Did the runner hit CPU, disk, memory, network-pool, or TTL limits?
+6. Is any required tunnel or forward process alive and reachable from a task container?
+7. Did the runner hit CPU, disk, inode, memory, network-pool, or lease limits?
 
 Elapsed time alone is not failure evidence. Under an unbounded policy, a child process can wait forever; report it and preserve the run unless recovery is authorized.
 
@@ -283,7 +295,7 @@ An intentionally stopped job is not complete even if its finalized stats say eve
 - record the exact cutoff condition, snapshot time, signal target, and driver exit;
 - list trials that completed or were cancelled during the shutdown race.
 
-Before releasing an ephemeral runner, copy aggregate `result.json`, resolved `config.json`, cutoff snapshots, driver/watchdog logs, and relevant server logs to durable storage. Verify hashes after transfer. Trial directories can be retained selectively when their size makes full archival impractical.
+Before releasing an ephemeral CPU runner or GPU server, copy aggregate `result.json`, resolved `config.json`, cutoff snapshots, driver/watchdog logs, and relevant server logs to durable storage. Verify hashes after transfer. Trial directories can be retained selectively when their size makes full archival impractical.
 
 ## Phase 7: compare harnesses and report
 
@@ -311,7 +323,7 @@ For stochastic pass@1 reruns, compare outcomes only on tasks that reached natura
 
 ## Phase 8: pass@k
 
-Harbor uses `n_attempts`; TB2.1 pass@16 is 89 × 16 = 1,424 trials. Keep trial concurrency fixed unless intentionally testing capacity, and extend both runner and server TTL before launch.
+Harbor uses `n_attempts`; TB2.1 pass@16 is 89 × 16 = 1,424 trials. Keep trial concurrency fixed unless intentionally testing capacity, and extend both CPU runner and GPU server leases before launch.
 
 ```bash
 python3 "$TB_HARBOR_SKILL_DIR/scripts/render_config.py" \
@@ -330,4 +342,4 @@ Validate Harbor's pass-at-k output independently with `summarize_job.py`. It gro
 
 ## Troubleshooting routing
 
-Read [troubleshooting.md](references/troubleshooting.md) for Docker network exhaustion, setup download resets, timeout process leaks, content-block compatibility, Pi argv bugs, self-termination, unbounded subprocess waits, TTL expiry, runtime-image drift, partial and cancelled jobs, score cutoffs, artifact retention, and suspicious reference-score gaps.
+Read [troubleshooting.md](references/troubleshooting.md) for Docker network exhaustion, cold image failures, endpoint-route loss, setup download resets, timeout process leaks, content-block compatibility, effort mapping, Pi argv bugs, self-termination, unbounded subprocess waits, lease expiry, runtime-image drift, partial and cancelled jobs, score cutoffs, artifact retention, and suspicious reference-score gaps.
