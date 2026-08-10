@@ -13,7 +13,7 @@ Run DeepSWE without conflating the task corpus, orchestration backend, agent har
 | Goal | Backend | Agent |
 |---|---|---|
 | Reproduce the DeepSWE public workflow | Pier | `mini-swe-agent` |
-| Run the current task format locally | Harbor 0.20.0 or Pier 0.3.0 | Any compatible agent |
+| Run the current task format locally | Harbor 0.20.0 or Pier `0daf53d` | Any compatible agent |
 | Run the Kimi Vendor Verifier profile | Pier | Kimi Code 0.23.6 or newer |
 | Evaluate current npm Kimi Code outside the KVV profile | Pier | Kimi Code |
 
@@ -93,9 +93,15 @@ Do not use `socat -v` with authenticated model traffic. It records request heade
 For the canonical Pier path:
 
 ```bash
-uv tool install 'datacurve-pier==0.3.0'
+git clone https://github.com/datacurve-ai/pier.git pier
+git -C pier checkout --detach 0daf53d3599e58c4506cf0bcff5e12c77dc282d2
+uv tool install --force ./pier
 pier --version
 ```
+
+Pier reports version `0.3.0` at this commit, but the PyPI `0.3.0` release is an
+older build without DeepSWE v1.1 collect-hook execution. Pin the Git commit and
+record it; `pier --version` alone is insufficient provenance.
 
 For Harbor:
 
@@ -131,7 +137,7 @@ harbor run --path deep-swe/tasks/abs-module-cache-flags \
 ```
 
 Do not use the built-in oracle as a reward or patch-collection gate for
-DeepSWE v1.1. Pier 0.3.0's oracle does not commit the reference changes before
+DeepSWE v1.1. Pier `0daf53d`'s oracle does not commit the reference changes before
 the task's `git diff BASE HEAD` collect hook, so it can finish with an empty
 artifact set and reward 0. Preserve and report that result rather than treating
 it as a solved task. The real-agent smoke below is mandatory.

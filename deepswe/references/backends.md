@@ -11,7 +11,12 @@ Use Pier when:
 - using Pier trajectory and critique tooling;
 - an existing run or artifact set was created by Pier.
 
-Pier 0.3.0 supports the DeepSWE v1.1 separate verifier and collect-hook workflow. Its built-in agents do not include Kimi Code, so the optional adapter in `scripts/kimi_code_agent.py` registers it through `--agent-import-path`.
+Pier commit `0daf53d3599e58c4506cf0bcff5e12c77dc282d2` supports the
+DeepSWE v1.1 separate verifier and collect-hook workflow. It reports package
+version `0.3.0`, but the older PyPI `0.3.0` build does not execute these collect
+hooks. Pin and record the Git commit instead of relying on the package version.
+Pier's built-in agents do not include Kimi Code, so the optional adapter in
+`scripts/kimi_code_agent.py` registers it through `--agent-import-path`.
 
 ## Harbor
 

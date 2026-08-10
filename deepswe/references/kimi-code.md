@@ -19,7 +19,7 @@ not interchangeable with Kimi Code results.
 
 ## Pier custom adapter
 
-Pier 0.3.0 does not include Kimi Code. Put this skill's scripts directory on `PYTHONPATH` and register the bundled adapter:
+Pier commit `0daf53d` does not include Kimi Code. Put this skill's scripts directory on `PYTHONPATH` and register the bundled adapter:
 
 ```bash
 export PYTHONPATH="<skill-dir>/scripts${PYTHONPATH:+:$PYTHONPATH}"
