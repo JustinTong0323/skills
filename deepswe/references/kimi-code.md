@@ -1,0 +1,100 @@
+# Optional Kimi Code agent
+
+Kimi Code is an optional DeepSWE agent. Do not make it a prerequisite for general DeepSWE runs.
+
+## Choose the profile
+
+- General Kimi Code evaluation: Harbor or Pier is valid; report the selected backend.
+- KVV DeepSWE profile: use Pier and Kimi Code 0.23.6 or newer because that is the published KVV contract.
+
+Pin the package version. Do not use floating `latest` for a scored run.
+
+## Harbor built-in adapter
+
+Harbor 0.20.0 includes `kimi-code`:
+
+```bash
+harbor run --path deep-swe/tasks/abs-module-cache-flags \
+  --agent kimi-code \
+  --agent-kwarg version=0.23.6 \
+  --model MODEL_ID \
+  --allow-agent-host MODEL_ENDPOINT_HOST \
+  --agent-env KIMI_MODEL_NAME=MODEL_ID \
+  --agent-env KIMI_MODEL_API_KEY="$MODEL_API_KEY" \
+  --agent-env KIMI_MODEL_BASE_URL="$MODEL_BASE_URL" \
+  --agent-env KIMI_MODEL_PROVIDER_TYPE=openai \
+  --job-name deepswe-kimi-smoke \
+  --jobs-dir "$DEEPSWE_JOBS" \
+  --yes
+```
+
+Use provider type `kimi` for the Kimi protocol and `openai` for a compatible gateway when supported by the selected Kimi Code version. Harbor's `--model` records trial metadata; `KIMI_MODEL_NAME` controls the model Kimi Code calls.
+
+The Harbor adapter intentionally reports `SUPPORTS_ATIF = False` for Kimi Code. Preserve its raw stream JSON output instead of claiming a lossy conversion is a complete ATIF trajectory.
+
+## Pier custom adapter
+
+Pier 0.3.0 does not include Kimi Code. Put this skill's scripts directory on `PYTHONPATH` and register the bundled adapter:
+
+```bash
+export PYTHONPATH="<skill-dir>/scripts${PYTHONPATH:+:$PYTHONPATH}"
+
+pier run -p deep-swe/tasks/abs-module-cache-flags \
+  --agent-import-path kimi_code_agent:KimiCode \
+  --model MODEL_ID \
+  --agent-kwarg version=0.23.6 \
+  --agent-env KIMI_MODEL_NAME=MODEL_ID \
+  --agent-env KIMI_MODEL_API_KEY="$MODEL_API_KEY" \
+  --agent-env KIMI_MODEL_BASE_URL="$MODEL_BASE_URL" \
+  --agent-env KIMI_MODEL_PROVIDER_TYPE=openai \
+  --job-name deepswe-kimi-smoke \
+  --jobs-dir "$DEEPSWE_JOBS" \
+  --yes
+```
+
+The adapter:
+
+- rejects missing or pre-0.23.6 versions;
+- installs the exact npm package into `$HOME/.local` and loads the pinned Node runtime;
+- derives the runtime allowlist from `KIMI_MODEL_BASE_URL`;
+- retains raw `stream-json` output and does not advertise incomplete ATIF support;
+- supports optional `max_steps_per_turn` and `max_retries_per_step` kwargs through Kimi Code's `[loop_control]` config.
+
+Kimi Code 0.23.6 defaults to three retries after a failed step. There is no `KIMI_LOOP_MAX_STEPS_PER_TURN` setting. To override the real config fields with the Pier adapter:
+
+```bash
+--agent-kwarg max_steps_per_turn=500 \
+--agent-kwarg max_retries_per_step=5
+```
+
+Omit `max_steps_per_turn` for no explicit limit. Treat retry changes as part of benchmark identity.
+
+## Model environment
+
+Common settings are:
+
+| Variable | Purpose |
+|---|---|
+| `KIMI_MODEL_NAME` | Model ID sent to the endpoint |
+| `KIMI_MODEL_API_KEY` | Bearer credential or endpoint-required placeholder |
+| `KIMI_MODEL_BASE_URL` | Container-visible API base URL; required by the Pier adapter |
+| `KIMI_MODEL_PROVIDER_TYPE` | `kimi` or compatible provider type |
+| `KIMI_MODEL_MAX_CONTEXT_SIZE` | Context size advertised to Kimi Code |
+| `KIMI_MODEL_CAPABILITIES` | Comma-separated model capabilities |
+| `KIMI_MODEL_THINKING_EFFORT` | Model-supported thinking effort |
+| `KIMI_MODEL_TEMPERATURE` | Optional temperature override |
+| `KIMI_MODEL_TOP_P` | Optional top-p override |
+| `KIMI_MODEL_MAX_COMPLETION_TOKENS` | Optional output-token limit |
+
+Do not assume a context size, thinking effort, temperature, or top-p value is required by DeepSWE itself. Derive them from the selected model/profile and record them.
+
+## KVV checks
+
+Before calling a result KVV-compatible:
+
+- use Pier;
+- pin Kimi Code at 0.23.6 or newer;
+- register it as the Pier agent, not as an out-of-band script;
+- run the relevant KVV API preflight tests for the endpoint;
+- record the KVV, Kimi Code, Pier, DeepSWE, adapter, and server revisions;
+- retain evidence of the effective Kimi Code version and request behavior.
