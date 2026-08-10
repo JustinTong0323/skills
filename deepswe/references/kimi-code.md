@@ -60,6 +60,29 @@ The adapter:
 - retains raw `stream-json` output and does not advertise incomplete ATIF support;
 - supports optional `max_steps_per_turn` and `max_retries_per_step` kwargs through Kimi Code's `[loop_control]` config.
 
+When an existing Kimi Code configuration already contains the provider and
+model, prefer file injection so the API key does not appear in the runner's
+process arguments:
+
+```bash
+chmod 600 "$HOME/.kimi-code/config.toml"
+
+pier run -p deep-swe/tasks/abs-module-cache-flags \
+  --agent-import-path kimi_code_agent:KimiCode \
+  --model radixark/k3 \
+  --agent-kwarg version=0.34.0 \
+  --agent-kwarg config_file="$HOME/.kimi-code/config.toml" \
+  --job-name deepswe-kimi-smoke \
+  --jobs-dir "$DEEPSWE_JOBS" \
+  --yes
+```
+
+The file must exist on the runner host and contain Kimi Code's normal
+`providers` and `models` tables. The adapter copies it into the task container
+with mode `0600`, derives endpoint hosts for the agent allowlist, and removes
+the transfer copy. Keep the job directory owner-only because trajectories and
+resolved metadata can still contain private prompts or endpoint details.
+
 Kimi Code 0.23.6 defaults to three retries after a failed step. There is no `KIMI_LOOP_MAX_STEPS_PER_TURN` setting. To override the real config fields with the Pier adapter:
 
 ```bash

@@ -1,5 +1,7 @@
 import re
 import shlex
+import tomllib
+from pathlib import Path
 from urllib.parse import urlparse
 
 from pier.agents.installed.base import BaseInstalledAgent, with_prompt_template
@@ -20,10 +22,12 @@ class KimiCode(BaseInstalledAgent):
     def __init__(
         self,
         *args,
+        config_file=None,
         max_steps_per_turn=None,
         max_retries_per_step=None,
         **kwargs,
     ):
+        self.config_file = self._config_file(config_file)
         self.max_steps_per_turn = self._positive_int(
             max_steps_per_turn, "max_steps_per_turn"
         )
@@ -53,6 +57,15 @@ class KimiCode(BaseInstalledAgent):
         if value < 0:
             raise ValueError(f"{name} must be non-negative")
         return value
+
+    @staticmethod
+    def _config_file(value):
+        if value is None:
+            return None
+        path = Path(value).expanduser().resolve()
+        if not path.is_file():
+            raise ValueError(f"Kimi Code config file does not exist: {path}")
+        return path
 
     @staticmethod
     def _path_prefix():
@@ -119,6 +132,14 @@ class KimiCode(BaseInstalledAgent):
             host = urlparse(base_url).hostname
             if host:
                 hosts.add(host.lower().rstrip("."))
+        if self.config_file:
+            config = tomllib.loads(self.config_file.read_text())
+            for provider in config.get("providers", {}).values():
+                if not isinstance(provider, dict):
+                    continue
+                host = urlparse(provider.get("base_url", "")).hostname
+                if host:
+                    hosts.add(host.lower().rstrip("."))
         return NetworkAllowlist(domains=sorted(hosts))
 
     def populate_context_post_run(self, context):
@@ -143,13 +164,27 @@ class KimiCode(BaseInstalledAgent):
     async def run(
         self, instruction, environment: BaseEnvironment, context: AgentContext
     ):
-        for key in (
-            "KIMI_MODEL_NAME",
-            "KIMI_MODEL_API_KEY",
-            "KIMI_MODEL_BASE_URL",
-        ):
-            if not self._has_env(key):
-                raise ValueError(f"{key} is required; pass it with --agent-env")
+        if self.config_file:
+            remote_config = "/tmp/harbor-kimi-code-config.toml"
+            await environment.upload_file(self.config_file, remote_config)
+            await self.exec_as_root(
+                environment,
+                command=(
+                    'agent_home="$(getent passwd agent | cut -d: -f6)"; '
+                    'install -d -m 700 -o agent -g agent "$agent_home/.kimi-code"; '
+                    f"install -m 600 -o agent -g agent {remote_config} "
+                    '"$agent_home/.kimi-code/config.toml"; '
+                    f"rm -f {remote_config}"
+                ),
+            )
+        else:
+            for key in (
+                "KIMI_MODEL_NAME",
+                "KIMI_MODEL_API_KEY",
+                "KIMI_MODEL_BASE_URL",
+            ):
+                if not self._has_env(key):
+                    raise ValueError(f"{key} is required; pass it with --agent-env")
 
         env = self.build_process_env()
         for key in (
