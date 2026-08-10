@@ -141,7 +141,8 @@ class KimiAdapterSourceTests(unittest.TestCase):
         self.assertNotIn("KIMI_LOOP_MAX_STEPS_PER_TURN", source)
         self.assertIn('npm install --global --prefix "$HOME/.local"', source)
         self.assertIn("environment.upload_file", source)
-        self.assertIn("install -m 600 -o agent -g agent", source)
+        self.assertIn('"$(id -u)" "$(id -g)" "$HOME"', source)
+        self.assertIn("install -m 600 -o {uid} -g {gid}", source)
 
     def test_adapter_config_file_does_not_enter_process_env(self):
         source = (SCRIPTS / "kimi_code_agent.py").read_text()

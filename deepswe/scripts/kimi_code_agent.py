@@ -167,13 +167,21 @@ class KimiCode(BaseInstalledAgent):
         if self.config_file:
             remote_config = "/tmp/harbor-kimi-code-config.toml"
             await environment.upload_file(self.config_file, remote_config)
+            identity = await self.exec_as_agent(
+                environment,
+                command='printf "%s\n%s\n%s\n" "$(id -u)" "$(id -g)" "$HOME"',
+            )
+            uid, gid, agent_home = identity.stdout.splitlines()
+            if not uid.isdigit() or not gid.isdigit() or not agent_home.startswith("/"):
+                raise ValueError("cannot resolve Kimi Code runtime identity")
+            config_dir = shlex.quote(f"{agent_home}/.kimi-code")
+            config_path = shlex.quote(f"{agent_home}/.kimi-code/config.toml")
             await self.exec_as_root(
                 environment,
                 command=(
-                    'agent_home="$(getent passwd agent | cut -d: -f6)"; '
-                    'install -d -m 700 -o agent -g agent "$agent_home/.kimi-code"; '
-                    f"install -m 600 -o agent -g agent {remote_config} "
-                    '"$agent_home/.kimi-code/config.toml"; '
+                    f"install -d -m 700 -o {uid} -g {gid} {config_dir}; "
+                    f"install -m 600 -o {uid} -g {gid} {remote_config} "
+                    f"{config_path}; "
                     f"rm -f {remote_config}"
                 ),
             )
