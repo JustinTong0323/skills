@@ -143,6 +143,8 @@ class KimiAdapterSourceTests(unittest.TestCase):
         self.assertIn("environment.upload_file", source)
         self.assertIn('"$(id -u)" "$(id -g)" "$HOME"', source)
         self.assertIn("install -m 600 -o {uid} -g {gid}", source)
+        self.assertIn('"CHOKIDAR_USEPOLLING": "true"', source)
+        self.assertIn("watch_poll_interval_ms", source)
 
     def test_adapter_config_file_does_not_enter_process_env(self):
         source = (SCRIPTS / "kimi_code_agent.py").read_text()

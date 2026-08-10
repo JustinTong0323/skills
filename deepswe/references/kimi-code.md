@@ -83,6 +83,17 @@ with mode `0600`, derives endpoint hosts for the agent allowlist, and removes
 the transfer copy. Keep the job directory owner-only because trajectories and
 resolved metadata can still contain private prompts or endpoint details.
 
+On a shared Docker host whose inotify quota is already exhausted, enable
+container-local filesystem polling instead of changing host-wide sysctls:
+
+```bash
+--agent-kwarg filesystem_polling=true \
+--agent-kwarg watch_poll_interval_ms=1000
+```
+
+Record this setting with the run. Polling avoids Kimi Code `EMFILE` watcher
+failures but consumes more CPU, especially on large repositories.
+
 Kimi Code 0.23.6 defaults to three retries after a failed step. There is no `KIMI_LOOP_MAX_STEPS_PER_TURN` setting. To override the real config fields with the Pier adapter:
 
 ```bash

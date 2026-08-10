@@ -23,11 +23,19 @@ class KimiCode(BaseInstalledAgent):
         self,
         *args,
         config_file=None,
+        filesystem_polling=False,
+        watch_poll_interval_ms=1000,
         max_steps_per_turn=None,
         max_retries_per_step=None,
         **kwargs,
     ):
         self.config_file = self._config_file(config_file)
+        self.filesystem_polling = self._boolean(
+            filesystem_polling, "filesystem_polling"
+        )
+        self.watch_poll_interval_ms = self._positive_int(
+            watch_poll_interval_ms, "watch_poll_interval_ms"
+        )
         self.max_steps_per_turn = self._positive_int(
             max_steps_per_turn, "max_steps_per_turn"
         )
@@ -66,6 +74,17 @@ class KimiCode(BaseInstalledAgent):
         if not path.is_file():
             raise ValueError(f"Kimi Code config file does not exist: {path}")
         return path
+
+    @staticmethod
+    def _boolean(value, name):
+        if isinstance(value, bool):
+            return value
+        normalized = str(value).strip().lower()
+        if normalized in ("1", "true", "yes", "on"):
+            return True
+        if normalized in ("0", "false", "no", "off"):
+            return False
+        raise ValueError(f"{name} must be a boolean")
 
     @staticmethod
     def _path_prefix():
@@ -219,6 +238,13 @@ class KimiCode(BaseInstalledAgent):
                 "NO_COLOR": "1",
             }
         )
+        if self.filesystem_polling:
+            env.update(
+                {
+                    "CHOKIDAR_USEPOLLING": "true",
+                    "CHOKIDAR_INTERVAL": str(self.watch_poll_interval_ms),
+                }
+            )
 
         skills_arg = ""
         if self.skills_dir:
