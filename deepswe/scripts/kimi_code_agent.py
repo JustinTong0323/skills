@@ -90,7 +90,7 @@ class KimiCode(BaseInstalledAgent):
     def _path_prefix():
         return (
             'export NVM_DIR="$HOME/.nvm"; '
-            '[ ! -s "$NVM_DIR/nvm.sh" ] || . "$NVM_DIR/nvm.sh"; '
+            '[ ! -s "$NVM_DIR/nvm.sh" ] || . "$NVM_DIR/nvm.sh" || command -v nvm >/dev/null; '
             'export PATH="$HOME/.local/bin:$PATH"; '
         )
 
@@ -128,7 +128,7 @@ class KimiCode(BaseInstalledAgent):
                         "set -euo pipefail; "
                         "curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.2/install.sh | bash; "
                         'export NVM_DIR="$HOME/.nvm"; '
-                        '. "$NVM_DIR/nvm.sh"; '
+                        '. "$NVM_DIR/nvm.sh" || command -v nvm >/dev/null; '
                         "nvm install 22; "
                         'mkdir -p "$HOME/.local"; '
                         f'npm install --global --prefix "$HOME/.local" {PACKAGE}@{version}; '

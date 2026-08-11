@@ -140,6 +140,7 @@ class KimiAdapterSourceTests(unittest.TestCase):
         self.assertIn("max_steps_per_turn", source)
         self.assertNotIn("KIMI_LOOP_MAX_STEPS_PER_TURN", source)
         self.assertIn('npm install --global --prefix "$HOME/.local"', source)
+        self.assertEqual(source.count('|| command -v nvm >/dev/null;'), 2)
         self.assertIn("environment.upload_file", source)
         self.assertIn('"$(id -u)" "$(id -g)" "$HOME"', source)
         self.assertIn("install -m 600 -o {uid} -g {gid}", source)
