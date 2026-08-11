@@ -149,6 +149,10 @@ def build_job(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any] 
     if args.agent == "pi":
         if args.pi_models_path is None:
             raise ValueError("--pi-models-path is required for the Pi harness")
+        if Path(args.output).resolve() == Path(args.pi_models_path).resolve():
+            raise ValueError(
+                "--output and --pi-models-path must refer to different files"
+            )
         job["environment"] = {
             "type": "docker",
             "mounts": [
@@ -169,7 +173,7 @@ def write_json(path: str | Path, data: dict[str, Any]) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w") as output:
-        json.dump(data, output, indent=2)
+        json.dump(data, output, indent=2, allow_nan=False)
         output.write("\n")
     os.chmod(destination, 0o600)
 
@@ -188,6 +192,20 @@ def finite_positive_float(value: str) -> float:
     return number
 
 
+def finite_non_negative_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        raise argparse.ArgumentTypeError("must be finite and non-negative")
+    return number
+
+
+def probability_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number) or not 0 < number <= 1:
+        raise argparse.ArgumentTypeError("must be finite and in (0, 1]")
+    return number
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -203,8 +221,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--context-window", type=positive_int, required=True)
     parser.add_argument("--max-output-tokens", type=positive_int, required=True)
     parser.add_argument("--reasoning-effort", default="max")
-    parser.add_argument("--temperature", type=float, default=1.0)
-    parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--temperature", type=finite_non_negative_float, default=1.0)
+    parser.add_argument("--top-p", type=probability_float, default=0.95)
     parser.add_argument(
         "--interleaved-thinking", action=argparse.BooleanOptionalAction, default=True
     )

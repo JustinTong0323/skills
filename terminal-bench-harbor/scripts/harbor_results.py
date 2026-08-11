@@ -114,9 +114,8 @@ def config_differences(left: Any, right: Any, path: str = "$") -> list[str]:
 
 
 def expected_task_count(
-    result: dict[str, Any], config: dict[str, Any], eval_count: int
+    result: dict[str, Any], attempts: int, eval_count: int
 ) -> int | None:
-    attempts = int(config.get("n_attempts", 1))
     total = result.get("n_total_trials")
     divisor = attempts * max(eval_count, 1)
     if not isinstance(total, int) or total % divisor:
@@ -198,8 +197,10 @@ def summarize(path: str | Path, target_passes: int | None = None) -> dict[str, A
     stats = result.get("stats", {})
     evals = stats.get("evals", {})
     complete = is_complete(result)
-    attempts = int(config.get("n_attempts", 1))
-    expected_tasks = expected_task_count(result, config, len(evals))
+    attempts = config.get("n_attempts")
+    if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts <= 0:
+        raise ValueError("config.json must contain a positive integer n_attempts")
+    expected_tasks = expected_task_count(result, attempts, len(evals))
     return {
         "path": str(result_path),
         "id": result.get("id"),

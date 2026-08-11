@@ -89,6 +89,13 @@ class HarborResultsTests(unittest.TestCase):
         self.assertTrue(value["complete"])
         self.assertEqual(value["evals"][0]["pass_at_attempts"], 0.5)
 
+    def test_summary_rejects_missing_attempt_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job = Path(directory)
+            (job / "result.json").write_text(json.dumps(self.result()))
+            with self.assertRaisesRegex(ValueError, "positive integer n_attempts"):
+                summarize(job)
+
     def test_incomplete_summary_is_not_final(self) -> None:
         result = self.result(finished=False)
         self.assertFalse(is_complete(result))
@@ -254,7 +261,7 @@ class HarborResultsTests(unittest.TestCase):
 
 
 class RenderConfigTests(unittest.TestCase):
-    def run_renderer(self, agent: str, directory: Path) -> tuple[dict, dict | None]:
+    def renderer_command(self, agent: str, directory: Path) -> list[str]:
         output = directory / "job.json"
         models = directory / "models.json"
         command = [
@@ -281,6 +288,12 @@ class RenderConfigTests(unittest.TestCase):
         ]
         if agent == "pi":
             command.extend(("--pi-models-path", str(models)))
+        return command
+
+    def run_renderer(self, agent: str, directory: Path) -> tuple[dict, dict | None]:
+        output = directory / "job.json"
+        models = directory / "models.json"
+        command = self.renderer_command(agent, directory)
         subprocess.run(command, check=True)
         job = json.loads(output.read_text())
         model_config = json.loads(models.read_text()) if models.exists() else None
@@ -294,6 +307,23 @@ class RenderConfigTests(unittest.TestCase):
         )
         self.assertEqual(job["agents"][0]["model_name"], "openai/org/model")
         self.assertEqual(job["agents"][0]["env"]["OPENAI_API_KEY"], "EMPTY")
+
+    def test_rejects_invalid_sampling_values(self) -> None:
+        cases = (
+            ("--temperature", "nan"),
+            ("--temperature", "-0.1"),
+            ("--top-p", "nan"),
+            ("--top-p", "0"),
+            ("--top-p", "1.1"),
+        )
+        for option, value in cases:
+            with self.subTest(option=option, value=value):
+                with tempfile.TemporaryDirectory() as directory:
+                    command = self.renderer_command("terminus-2", Path(directory))
+                    process = subprocess.run(
+                        [*command, option, value], capture_output=True, text=True
+                    )
+                self.assertNotEqual(process.returncode, 0)
 
     def test_claude_uses_server_root(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -311,6 +341,18 @@ class RenderConfigTests(unittest.TestCase):
         self.assertEqual(
             job["environment"]["mounts"][0]["target"], "/root/.pi/agent/models.json"
         )
+
+    def test_pi_rejects_aliased_output_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "job.json"
+            command = self.renderer_command("pi", root)
+            models_index = command.index("--pi-models-path") + 1
+            command[models_index] = str(output)
+            process = subprocess.run(command, capture_output=True, text=True)
+            self.assertFalse(output.exists())
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn("must refer to different files", process.stderr)
 
 
 if __name__ == "__main__":

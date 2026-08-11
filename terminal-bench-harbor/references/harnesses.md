@@ -44,7 +44,7 @@ Use the OpenAI `/v1` base. The renderer produces the equivalent of:
 }
 ```
 
-Replace model limits with the served model's actual values. Terminus-2 is the closest of these stock Harbor agents to a controlled temperature/top-p experiment.
+Replace model limits with the served model's actual values. Terminus-2 is the closest of these stock Harbor agents to a controlled temperature/top-p experiment. The renderer requires a finite non-negative temperature and `0 < top_p <= 1`.
 
 ## Claude Code
 
@@ -86,7 +86,7 @@ The Harbor Pi adapter does not generate a custom provider registry. Mount an own
 }
 ```
 
-The renderer writes a provider with `api: openai-completions`, the OpenAI `/v1` base, a reasoning-effort mapping, context and output limits, zero local cost, and reasoning replay support. Use:
+The renderer writes a provider with `api: openai-completions`, the OpenAI `/v1` base, a reasoning-effort mapping, context and output limits, zero local cost, and reasoning replay support. Keep the job `--output` and `--pi-models-path` as distinct files; the renderer rejects aliased paths. Use:
 
 ```text
 --agent pi

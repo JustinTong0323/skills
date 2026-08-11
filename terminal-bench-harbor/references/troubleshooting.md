@@ -177,7 +177,7 @@ Do not attribute the entire gap to the model when the reference harness is unava
 
 Repeat a surprising pass@1 result with a new job identity and a structurally equivalent config. Compare only tasks naturally graded in both jobs, report left-only and right-only passes, and separate net score movement from total task churn. Large bidirectional churn indicates stochastic variance even when the headline scores are close.
 
-If either job lacks `config.json`, report configuration equivalence as unknown. Two missing configuration artifacts are not evidence that the runs were equivalent.
+If either job lacks `config.json`, report configuration equivalence as unknown. Two missing configuration artifacts are not evidence that the runs were equivalent. `summarize_job.py` requires a positive `n_attempts` value from the resolved config instead of inferring pass@k from an incomplete artifact set.
 
 ## Pass@16 looks unexpectedly high or low
 
