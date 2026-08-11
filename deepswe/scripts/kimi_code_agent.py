@@ -1,7 +1,9 @@
 import re
 import shlex
 import tomllib
+from contextlib import contextmanager
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from urllib.parse import urlparse
 
 from pier.agents.installed.base import BaseInstalledAgent, with_prompt_template
@@ -9,6 +11,8 @@ from pier.environments.base import BaseEnvironment
 from pier.models.agent.context import AgentContext
 from pier.models.agent.install import AgentInstallSpec, InstallStep
 from pier.models.agent.network import NetworkAllowlist
+
+from kimi_config import merge_loop_control
 
 
 PACKAGE = "@moonshot-ai/kimi-code"
@@ -164,47 +168,30 @@ class KimiCode(BaseInstalledAgent):
     def populate_context_post_run(self, context):
         return None
 
-    def _loop_control_command(self):
-        values = []
-        if self.max_steps_per_turn is not None:
-            values.append(f"max_steps_per_turn = {self.max_steps_per_turn}")
-        if self.max_retries_per_step is not None:
-            values.append(f"max_retries_per_step = {self.max_retries_per_step}")
-        if not values:
-            return ""
-        config = "[loop_control]\\n" + "\\n".join(values) + "\\n"
-        return (
-            'mkdir -p "$HOME/.kimi-code"; '
-            f"printf '%b' {shlex.quote(config)} > \"$HOME/.kimi-code/config.toml\"; "
-            'chmod 600 "$HOME/.kimi-code/config.toml"; '
+    @contextmanager
+    def _effective_config_file(self):
+        if self.config_file:
+            config_text = self.config_file.read_text()
+        else:
+            config_text = ""
+        merged = merge_loop_control(
+            config_text,
+            self.max_steps_per_turn,
+            self.max_retries_per_step,
         )
+        if merged == config_text:
+            yield self.config_file
+            return
+        with NamedTemporaryFile(mode="w", encoding="utf-8") as temporary:
+            temporary.write(merged)
+            temporary.flush()
+            yield Path(temporary.name)
 
     @with_prompt_template
     async def run(
         self, instruction, environment: BaseEnvironment, context: AgentContext
     ):
-        if self.config_file:
-            remote_config = "/tmp/harbor-kimi-code-config.toml"
-            await environment.upload_file(self.config_file, remote_config)
-            identity = await self.exec_as_agent(
-                environment,
-                command='printf "%s\n%s\n%s\n" "$(id -u)" "$(id -g)" "$HOME"',
-            )
-            uid, gid, agent_home = identity.stdout.splitlines()
-            if not uid.isdigit() or not gid.isdigit() or not agent_home.startswith("/"):
-                raise ValueError("cannot resolve Kimi Code runtime identity")
-            config_dir = shlex.quote(f"{agent_home}/.kimi-code")
-            config_path = shlex.quote(f"{agent_home}/.kimi-code/config.toml")
-            await self.exec_as_root(
-                environment,
-                command=(
-                    f"install -d -m 700 -o {uid} -g {gid} {config_dir}; "
-                    f"install -m 600 -o {uid} -g {gid} {remote_config} "
-                    f"{config_path}; "
-                    f"rm -f {remote_config}"
-                ),
-            )
-        else:
+        if not self.config_file:
             for key in (
                 "KIMI_MODEL_NAME",
                 "KIMI_MODEL_API_KEY",
@@ -212,6 +199,33 @@ class KimiCode(BaseInstalledAgent):
             ):
                 if not self._has_env(key):
                     raise ValueError(f"{key} is required; pass it with --agent-env")
+
+        with self._effective_config_file() as config_file:
+            if config_file:
+                remote_config = "/tmp/harbor-kimi-code-config.toml"
+                await environment.upload_file(config_file, remote_config)
+                identity = await self.exec_as_agent(
+                    environment,
+                    command='printf "%s\n%s\n%s\n" "$(id -u)" "$(id -g)" "$HOME"',
+                )
+                uid, gid, agent_home = identity.stdout.splitlines()
+                if (
+                    not uid.isdigit()
+                    or not gid.isdigit()
+                    or not agent_home.startswith("/")
+                ):
+                    raise ValueError("cannot resolve Kimi Code runtime identity")
+                config_dir = shlex.quote(f"{agent_home}/.kimi-code")
+                config_path = shlex.quote(f"{agent_home}/.kimi-code/config.toml")
+                await self.exec_as_root(
+                    environment,
+                    command=(
+                        f"install -d -m 700 -o {uid} -g {gid} {config_dir}; "
+                        f"install -m 600 -o {uid} -g {gid} {remote_config} "
+                        f"{config_path}; "
+                        f"rm -f {remote_config}"
+                    ),
+                )
 
         env = self.build_process_env()
         for key in (
@@ -254,7 +268,6 @@ class KimiCode(BaseInstalledAgent):
             command=(
                 "set -euo pipefail; "
                 f"{self._path_prefix()}"
-                f"{self._loop_control_command()}"
                 f"kimi --prompt {shlex.quote(instruction)} "
                 f"{skills_arg}--output-format stream-json "
                 f"</dev/null 2>&1 | stdbuf -oL tee {OUTPUT_PATH}"

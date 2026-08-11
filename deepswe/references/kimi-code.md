@@ -43,7 +43,7 @@ The adapter:
 - installs the exact npm package into `$HOME/.local` and loads the pinned Node runtime;
 - derives the runtime allowlist from `KIMI_MODEL_BASE_URL`;
 - retains raw `stream-json` output and does not advertise incomplete ATIF support;
-- supports optional `max_steps_per_turn` and `max_retries_per_step` kwargs through Kimi Code's `[loop_control]` config.
+- supports optional `max_steps_per_turn` and `max_retries_per_step` kwargs through Kimi Code's `[loop_control]` config without replacing provider or model tables.
 
 When an existing Kimi Code configuration already contains the provider and
 model, prefer file injection so the API key does not appear in the runner's
@@ -67,6 +67,11 @@ The file must exist on the runner host and contain Kimi Code's normal
 with mode `0600`, derives endpoint hosts for the agent allowlist, and removes
 the transfer copy. Keep the job directory owner-only because trajectories and
 resolved metadata can still contain private prompts or endpoint details.
+
+When loop-control kwargs are combined with `config_file`, the adapter parses the
+host file, changes only the requested `[loop_control]` keys in a mode-0600
+temporary copy, validates the merged TOML, and uploads that copy. The original
+host file remains unchanged.
 
 On a shared Docker host whose inotify quota is already exhausted, enable
 container-local filesystem polling instead of changing host-wide sysctls:
@@ -106,6 +111,25 @@ Common settings are:
 | `KIMI_MODEL_MAX_COMPLETION_TOKENS` | Optional output-token limit |
 
 Do not assume a context size, thinking effort, temperature, or top-p value is required by DeepSWE itself. Derive them from the selected model/profile and record them.
+
+Record client overrides separately from effective server sampling. When
+`KIMI_MODEL_TEMPERATURE` and `KIMI_MODEL_TOP_P` are absent, report that Kimi Code
+omitted those fields; do not call an inferred value the observed request value.
+The public Kimi K3 `generation_config.json` at revision `9f62e4e9` defines
+`max_length` and `eos_token_id`, not temperature or top-p. Kimi's official K3
+API contract fixes temperature at 1.0 and top-p at 0.95 and asks clients to omit
+them, but a compatible third-party endpoint requires server configuration or
+request-log evidence before claiming it applied that contract.
+
+## Full-run validation profile
+
+The completed 113-task local-Docker validation used Pier `0daf53d`, Kimi Code
+0.34.0, filesystem polling at 1000 ms, four concurrent trials, and no explicit
+loop or sampling overrides. The immutable primary job produced 67 reward-1, 41
+reward-0, and five ungraded outcomes. A separate four-task recovery validated
+the nvm source guard and raised the corrected strict result to 71/113 while one
+verifier timeout remained zero. This validates the recorded profile, not a
+universal Kimi Code sampling or concurrency requirement.
 
 ## KVV checks
 

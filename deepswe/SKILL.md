@@ -178,7 +178,7 @@ pier run -p deep-swe/tasks \
   --agent-kwarg model_class=litellm \
   --agent-env OPENAI_BASE_URL="$MODEL_BASE_URL" \
   --agent-env MSWEA_API_KEY="$MODEL_API_KEY" \
-  --n-concurrent 8 \
+  --n-concurrent 4 \
   --job-name deepswe-MODEL-AGENT-r1 \
   --jobs-dir "$DEEPSWE_JOBS" \
   --yes
@@ -193,13 +193,13 @@ harbor run --path deep-swe/tasks \
   --allow-agent-host MODEL_ENDPOINT_HOST \
   --agent-env OPENAI_BASE_URL="$MODEL_BASE_URL" \
   --agent-env MSWEA_API_KEY="$MODEL_API_KEY" \
-  --n-concurrent 8 \
+  --n-concurrent 4 \
   --job-name deepswe-MODEL-AGENT-r1 \
   --jobs-dir "$DEEPSWE_JOBS" \
   --yes
 ```
 
-Start concurrency conservatively. Long agent histories can saturate endpoint context/KV capacity even when request count is below the server limit. Keep retry policy limited to declared infrastructure failures; retrying model, timeout, or verifier outcomes changes evaluation semantics.
+Start concurrency conservatively. The full local-Docker Kimi Code validation for this skill used four concurrent trials; treat that as a validated reference, not a universal maximum. Long agent histories can saturate endpoint context/KV capacity even when request count is below the server limit. Account for every benchmark sharing the runner or endpoint, and raise concurrency only after task throughput, endpoint queues, Docker build pressure, memory, and I/O remain healthy. Keep retry policy limited to declared infrastructure failures; retrying model, agent, task, or verifier outcomes changes evaluation semantics.
 
 Run long jobs detached with a durable log, driver PID, and exit-status marker. The existence of aggregate `result.json` is not a completion signal because runners update it incrementally.
 
@@ -212,7 +212,28 @@ pier job resume --job-path "$DEEPSWE_JOBS/JOB_NAME"
 harbor job resume --job-path "$DEEPSWE_JOBS/JOB_NAME"
 ```
 
-Both commands retry cancelled trials by default and retain completed trials. Passing another `--filter-error-type` removes matching failed trial directories before resume and creates a new attempt for those tasks. Do that only for an explicitly approved infrastructure recovery, preserve the prior artifacts, and report the retry.
+Both commands retry cancelled trials by default and retain completed trials. Use this path only to finish an interrupted job without changing its agent, model, harness, or scoring policy.
+
+Do not pass `--filter-error-type` against the primary scored job. The runner removes matching failed trial directories before creating new attempts, which destroys the immutable first-pass record.
+
+## Recover confirmed infrastructure failures
+
+After the primary job reaches a terminal state, classify each error before recovery. Run only explicitly approved pre-agent or infrastructure failures in a separately named job. Keep primary and recovery directories unchanged, keep their combined concurrency within the declared cap, and do not replace model, agent, task, context, timeout, or verifier outcomes.
+
+Create a corrected aggregate only with an exact task allowlist and the original exception type:
+
+```bash
+python3 <skill-dir>/scripts/summarize_job.py \
+  "$DEEPSWE_JOBS/deepswe-MODEL-AGENT-r1" \
+  --expected 113 \
+  --recovery-job "$DEEPSWE_JOBS/deepswe-MODEL-AGENT-infra-r1" \
+  --replace-task TASK_A \
+  --replace-task TASK_B \
+  --allow-error-type RuntimeError \
+  --require-complete
+```
+
+The overlay rejects replacements that already have a reward, do not have the allowed original exception, or do not exactly match the recovery task set. Report both the original and corrected strict scores. A verifier timeout remains an ungraded zero unless the benchmark policy classified it as recoverable before looking at its retry outcome.
 
 ## Monitor without changing the run
 
@@ -223,6 +244,8 @@ At a fixed interval check:
 - task container count and log growth;
 - endpoint and tunnel health from the container-visible route;
 - disk, inodes, Docker usage, memory, and I/O pressure.
+
+For behavioral auditing, sample trajectories at the beginning, middle, and end. Classify grammatical or word-order corruption separately from ordinary planning text, terse fragments, and malformed tool calls. Record whether an anomaly persisted or was immediately corrected; do not silently change the binary verifier score.
 
 Do not kill a slow task based only on elapsed time. Classify runner, image, network, endpoint, agent, context, and verifier failures first. Read [references/troubleshooting.md](references/troubleshooting.md) for failure routing.
 
@@ -250,6 +273,7 @@ Report:
 - completion state, retries, and cancellations;
 - corpus commit, backend, environment, agent/version, model/server revision;
 - endpoint protocol, context limit, thinking/sampling settings, timeouts, retries, and concurrency;
-- any infrastructure incident and whether a retry changed the original trial set.
+- any infrastructure incident and whether a retry changed the original trial set;
+- original and corrected scores plus the exact replacement task/error allowlist when an infrastructure recovery was overlaid.
 
 Do not report the observed mean over graded trials as the benchmark score. Do not compare Harbor and Pier results as a model-only A/B unless agent, prompt, network, timeout, retry, and verifier behavior are demonstrated equivalent.

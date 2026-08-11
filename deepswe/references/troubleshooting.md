@@ -20,7 +20,10 @@ Confirm the path contains this skill's `scripts/kimi_code_agent.py`.
 
 ## Kimi Code is unknown on Harbor
 
-Confirm Harbor is 0.20.0 or a newer version that still lists `kimi-code` as an installed agent. Older Harbor versions do not include the adapter.
+Harbor 0.20.0 lists the legacy Python `kimi-cli` agent, not the current npm
+`@moonshot-ai/kimi-code` agent. Use the bundled Pier adapter for current Kimi
+Code. A future Harbor adapter must be independently version-pinned and validated
+before its results are called Kimi Code results.
 
 ## Kimi Code installation fails
 
@@ -29,6 +32,15 @@ Use an exact package version. For the Pier adapter, setup requires access to `ra
 ## `kimi: command not found`
 
 The Node runtime or npm prefix is missing from `PATH`. The bundled Pier adapter sources `$HOME/.nvm/nvm.sh` and prepends `$HOME/.local/bin`. Do not switch to an unpinned installer with a different binary path during a scored run.
+
+## Kimi installation exits 3 after nvm reports global packages
+
+Some JavaScript task images already contain Node and global npm modules. nvm
+0.40.2 can define the `nvm` function but return status 3 while its shell script
+is sourced. Use the bundled source guard, which accepts the nonzero status only
+when `command -v nvm` confirms the function loaded, then still pins Node 22 and
+the requested Kimi Code version. Classify failures before agent startup as
+infrastructure outcomes and recover them only in a separate job.
 
 ## A Kimi step retries only three times
 
@@ -56,4 +68,12 @@ Check the driver, task containers, agent logs, endpoint queues, tunnel health, f
 
 ## Resume changes the score
 
-Verify whether the backend skipped completed trials, retried errored trials, or replaced artifacts. Preserve old failed attempts and record the retry policy. A run with added attempts is not the original pass@1 trial set.
+Verify whether the backend skipped completed trials, retried errored trials, or replaced artifacts. Never use filtered resume on the immutable primary job because it deletes matching failed trial directories. Put approved infrastructure recoveries in a separate job and use the scorer's exact task/error allowlist overlay. Report the original result even when a corrected aggregate is also valid; a run with added attempts is not the original pass@1 trial set.
+
+## A trajectory contains broken grammar or mixed words
+
+Inspect the surrounding turns and the beginning, middle, and end of other
+trajectories. Distinguish persistent grammatical or word-order corruption from
+ordinary planning text, terse fragments, and malformed code or tool calls.
+Report prevalence and whether the agent self-corrected. Trajectory quality is a
+separate audit dimension and does not replace the verifier reward.
