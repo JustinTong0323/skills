@@ -44,6 +44,22 @@ Harbor 0.20.0 can stop awaiting an agent without reliably killing every containe
 
 Changing or removing the deadline changes benchmark semantics. Preserve the bounded job and use a new job for an explicitly unbounded experiment.
 
+### Attribute a timeout by measurement, not by guess
+
+The deadline covers the whole agent phase: every turn, every tool call, and all model time. Measure what the wall clock actually contained rather than reasoning from the agent's reputation. From the trial's session JSONL, split the span by timestamp gaps into model time, tool-execution time, and agent overhead; count model calls and their mean latency; tally output tokens per turn; and record the stop reason on every turn.
+
+Read the result as:
+
+- stop reason never `max_tokens` means the output cap is not the constraint. The model is stopping naturally to call tools and simply reasoning at length per turn.
+- model time dominant means generation, not tooling. Combined with the per-stream throughput measurement from the contention preflight, this separates "the endpoint is slow" from "this harness generates far more tokens per task".
+- input tokens far above the other arm mean the harness replays a larger context per turn and pays more prefill.
+
+One measured campaign: across 8 timed-out trials, 9,222 s of wall span split into 7,619 s model time (82.6 percent), 1,578 s tool time, and 26 s overhead, over 1,164 model calls averaging 6.5 s. Stop reason was a tool call on every turn and never the output cap. Timed-out trials emitted roughly 132k output tokens each against about 15.7k for an average trial, with single turns peaking above 38k tokens. The first explanation offered, that the harness ran many slow tools, was wrong and the measurement refuted it.
+
+The decisive control is cross-arm: same endpoint, same concurrency, overlapping window, different harness. One arm producing 4 timeouts while another produced 15 rules out endpoint speed, because a slow endpoint penalizes both arms equally. In that campaign the slower arm also sent 3.4 times the input tokens for the same 89 tasks.
+
+Raising `agent_timeout_multiplier` is not a fix. It rescues the trials and destroys comparability with any published number. Lower concurrency or reduce reasoning effort instead, and report which you did.
+
 ## The same tasks stop timing out when rerun alone
 
 A rerun of only the errored tasks fills fewer concurrent slots, so it runs at materially lighter load. When timeouts vanish under that lighter queue, contention in the parent run was the dominant cause and the parent score is a floor rather than a measurement.

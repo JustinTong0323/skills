@@ -1,7 +1,7 @@
 ---
 name: terminal-bench-harbor
-description: "Run Terminal-Bench 2.1 with Harbor against a local or remote SGLang/OpenAI/Anthropic-compatible endpoint. Use whenever the user mentions Terminal-Bench, TB2.1, Harbor evaluation, Terminus-2, Claude Code or Pi as a Harbor harness, pass@1/pass@k, or asks to benchmark an agentic model in Docker terminal tasks. Covers runner sizing, endpoint preflight, reproducible configs, smoke gates, detached execution, score-ceiling monitoring, completion audits, harness comparison, and failure attribution."
-version: 1.2.0
+description: "Run Terminal-Bench 2.1 with Harbor against a local or remote SGLang/OpenAI/Anthropic-compatible endpoint. Use whenever the user mentions Terminal-Bench, TB2.1, Harbor evaluation, Terminus-2, Claude Code or Pi as a Harbor harness, pass@1/pass@k, or asks to benchmark an agentic model in Docker terminal tasks. Covers runner sizing, endpoint preflight, contention preflight, reproducible configs, smoke gates, detached execution, score-ceiling monitoring, completion audits, harness comparison, error-only rerun unions, and failure attribution."
+version: 1.3.0
 ---
 
 # Terminal-Bench with Harbor
@@ -195,10 +195,9 @@ The smoke must prove all of these:
 - at least one real tool loop;
 - trajectory and log capture;
 - artifact collection and verifier execution;
-- reward 1 with no agent, API, environment, or verifier exception;
-- the smoke's wall-clock time, recorded as a named baseline.
+- reward 1 with no agent, API, environment, or verifier exception.
 
-Keep that baseline. Compare it against the same task's smoke on any deployment whose score you intend to compare. A regression beyond roughly 2x on an identical task predicts timeout-class failures across the suite and means the two runs are not a model comparison. An observed 56 s to 3 m 11 s smoke regression on the same task and harness preceded a rise from 4 timeouts in 89 trials to 25 in 89 at half the concurrency.
+Record the smoke's wall-clock time as a named baseline, and compare it against the same task's smoke on any deployment whose score you intend to compare. A regression beyond roughly 2x on an identical task predicts timeout-class failures across the suite and means the two runs are not a model comparison. An observed 56 s to 3 m 11 s smoke regression on the same task and harness preceded a rise from 4 timeouts in 89 trials to 25 in 89 at half the concurrency.
 
 A direct API probe alone does not authorize the 89-task run. Inspect the smoke trajectory for the actual agent version, effective context/output limits, and emitted reasoning values; configured environment variables are not proof that the agent honored them.
 
@@ -315,6 +314,8 @@ python3 "$TB_HARBOR_SKILL_DIR/scripts/summarize_job.py" /home/ubuntu/tb21/jobs/R
 sha256sum /home/ubuntu/tb21/jobs/RUN/result.json /home/ubuntu/tb21/jobs/RUN/config.json
 ```
 
+A watchdog notification, a background-task completion event, or a `wait` that returns is not a completion signal either. Before auditing, re-read the direct signals: a non-null `finished_at`, the recorded driver exit status file, and the absence of the driver PID. Only those count. An audit begun on an indirect signal has to be retracted when the direct ones disagree.
+
 Trial-local JSON can be invalid after Harbor redaction inserts a literal `[REDACTED]`. Prefer the valid aggregate and inspect `exception.txt`, agent logs, session JSONL, and verifier artifacts for that trial.
 
 An intentionally stopped job is not complete even if its finalized stats say every slot is completed. Audit it with the last pre-stop snapshot and reward records:
@@ -341,7 +342,7 @@ Report:
 - passed tasks / 89 and mean reward;
 - exact dataset digest and attempts;
 - endpoint deployment slug and the smoke wall-time baseline;
-- trial concurrency, and per-stream throughput idle against at that concurrency;
+- trial concurrency, and per-stream throughput both idle and at that concurrency;
 - whether the score is deadline-limited. Any `AgentTimeoutError` present means the reported score is a floor, and the report must say so;
 - wall time, tokens, and reported cost separately;
 - error and retry counts by category;
@@ -372,6 +373,24 @@ Distinguish:
 
 Validate Harbor's pass-at-k output independently with `summarize_job.py`. It groups trial IDs by the task prefix before the final `__<trial-suffix>`. A partial or cancelled 1,424-trial job has no final pass@16, even if some tasks already succeeded.
 
+## Phase 8b: error-only reruns and union scores
+
+Rerunning only the errored or failed tasks in a new job is legitimate, and its union with the base run is sound arithmetic. A task that already passed cannot un-pass, so the union equals what a full rerun would have produced; retrying only failures is not cherry-picking for a union metric. Two constraints hold anyway:
+
+1. It is not pass@1. Never place a union beside a published pass@1 number, which compares two attempts to one.
+2. The second attempt is not an independent draw. A subset rerun fills fewer slots and therefore runs at lighter load, which advantages exactly the deadline-limited tasks that failed. Report the effective-load difference as a known confound rather than as an equivalent draw.
+
+Report base pass@1 and the union side by side, labelled, with the attempt count, and state which is comparable to published results. Only pass@1 is. One campaign moved from 62/89 to 75/89 over three attempts, a swing that was mostly deadline relief rather than new capability.
+
+Keep `n_concurrent_trials` and every other field identical so `compare_configs.py` shows only `job_name` and the task list as changed.
+
+Before launching the rerun, split the errored tasks and record a prediction:
+
+- deterministic harness failures, where Harbor rebuilds an identical broken command, will reproduce exactly. Include them for confirmation rather than as a second chance, and label them, or a reader scores them as the model failing a retry.
+- stochastic failures, such as timeouts and self-kills, may flip in either direction, including between error classes.
+
+Recording the prediction before the run is what makes the outcome evidence rather than narrative.
+
 ## Troubleshooting routing
 
-Read [troubleshooting.md](references/troubleshooting.md) for Docker network exhaustion, cold image failures, endpoint-route loss, setup download resets, timeout process leaks, content-block compatibility, effort mapping, Pi argv bugs, self-termination, unbounded subprocess waits, lease expiry, runtime-image drift, partial and cancelled jobs, score cutoffs, artifact retention, and suspicious reference-score gaps.
+Read [troubleshooting.md](references/troubleshooting.md) for Docker network exhaustion, cold image failures, endpoint-route loss, setup download resets, contention-driven timeouts, timeout attribution by measurement, timeout process leaks, content-block compatibility, effort mapping, Pi argv bugs, self-termination, harness-tax estimation, unbounded subprocess waits, lease expiry, runtime-image drift, partial and cancelled jobs, score cutoffs, artifact retention, and suspicious reference-score gaps.
