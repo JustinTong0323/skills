@@ -40,6 +40,8 @@ Record:
 
 Reject ambiguous prefixes, conflicting configs, missing keys, duplicate JSON keys, prequantized inputs, unsupported source dtypes, or an index whose logical keys differ from physical shard keys. Treat a single safetensors file as an implicit one-file key map and still inventory every physical key.
 
+Use `scripts/preflight.py` and `scripts/inventory.py` for the deterministic portions of this discovery. Supply Model Optimizer support, measured whole-model fit, and routed-exporter qualification as explicit evidence; the script must not infer them from a model name.
+
 ## Path Selection
 
 Record `conversion_path` as `whole_model` or `routed_expert_streaming`.
@@ -118,6 +120,8 @@ Canonicalize deterministic JSON and hash it before expensive work. Include at le
 ```
 
 Store the manifest under a generation directory keyed by the full digest. Once conversion output exists, never edit it. Any output-affecting change creates a new generation.
+
+`scripts/build_manifest.py` resolves the Model Optimizer checkout to an exact Git commit, hashes recipe and runner artifacts, rejects a non-executable preflight decision, and emits canonical manifest identity from normalized JSON inputs.
 
 ## Output Manifest
 

@@ -38,6 +38,61 @@ Read exactly one path reference after preflight:
 
 Read [validation-and-release.md](references/validation-and-release.md) before defining acceptance criteria, serving, or publishing.
 
+## Bundled Evidence Scripts
+
+The scripts in `scripts/` automate deterministic inspection and verification around the conversion. They deliberately do not reimplement Model Optimizer PTQ/export or provide a universal routed-expert assembler. Run them with Python 3.10 or newer; checkpoint inspection requires PyTorch and Safetensors, and remote verification requires Hugging Face Hub.
+
+Generate source evidence and make path selection explicit. Omit `--routed-exporter-qualified` for whole-model-only work:
+
+```bash
+python scripts/preflight.py "$SOURCE" \
+  --modelopt-supported yes \
+  --whole-model-fit yes \
+  --require-decision --output preflight.json
+python scripts/inventory.py "$SOURCE" --output source-inventory.json
+```
+
+`--routed-exporter-qualified=yes` means the exact architecture, fused tensor layout, exporter, and assembler have already passed the routed contract. Fused expert keys alone are insufficient evidence.
+
+For a routed run, also pass the exact expected layer IDs, for example `--expected-routed-layers 0,2,4`. Preflight requires the discovered fused layer set to match exactly, so non-contiguous hybrid layouts remain supported without accepting an incomplete checkpoint.
+
+Build the immutable conversion manifest after writing normalized JSON files for calibration, environment, arguments, precision contract, and topology:
+
+```bash
+python scripts/build_manifest.py \
+  --preflight preflight.json \
+  --source-inventory source-inventory.json \
+  --modelopt-root "$MODELOPT_ROOT" \
+  --recipe "$RECIPE" \
+  --calibration calibration.json \
+  --environment environment.json \
+  --arguments arguments.json \
+  --precision-contract precision-contract.json \
+  --topology topology.json \
+  --artifact "$CONVERSION_RUNNER" \
+  --source-repository "$SOURCE_REPOSITORY" \
+  --source-revision "$SOURCE_REVISION" \
+  --output conversion-manifest.json
+```
+
+After export, audit tensor structure and content, then bind candidate, durable, and hosted copies to one inventory:
+
+```bash
+python scripts/audit_checkpoint.py \
+  --source "$SOURCE" \
+  --output-checkpoint "$OUTPUT" \
+  --output tensor-audit.json
+python scripts/inventory.py "$OUTPUT" --output release-inventory.json
+python scripts/inventory.py "$DURABLE_OUTPUT" --output durable-inventory.json
+python scripts/compare_inventories.py release-inventory.json durable-inventory.json
+printf '%s\n' "$HF_TOKEN" | python scripts/verify_hf.py \
+  "$HF_REPOSITORY" release-inventory.json \
+  --revision "$HF_COMMIT" --visibility private \
+  --output hf-verification.json
+```
+
+If routed assembly emits precision metadata separately, pass its normalized `quantized_layers` contract with `--precision-contract`. Never weaken a failed script check without first resolving the mismatch.
+
 ## Workflow
 
 ### 1. Freeze Source And Dependency Identity

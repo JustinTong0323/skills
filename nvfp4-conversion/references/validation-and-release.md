@@ -18,6 +18,8 @@ For every tensor declared unchanged, compare a canonical logical content digest 
 
 Scan all recipe scale tensors with bounded CPU workers. Require finite, strictly positive values and record count/min/max.
 
+Run `scripts/audit_checkpoint.py` for unified-HF Model Optimizer output. It checks physical/index agreement, recipe metadata coverage, packed and scale forms, positive finite scales, and logical equality of unchanged tensors in bounded row chunks. A routed assembler must supply an equivalent `quantized_layers` precision contract when it does not emit `hf_quant_config.json`.
+
 ## SGLang Runtime Gate
 
 Launch the target SGLang revision on a devbox, not a local workstation. Explicitly set only arguments required by the qualified model/hardware combination. Record the exact command and serialized resolved server arguments.
@@ -126,6 +128,8 @@ After upload:
 Hugging Face may append an LFS rule for a large tokenizer to `.gitattributes`, changing the remote byte total. Download and inspect the file. If valid, synchronize the exact normalized file into local and durable checkpoints, regenerate inventories, and repeat full verification. Preserve a trailing newline so appended rules cannot concatenate.
 
 Delete no source, staging, or prior repository without explicit authorization and successful independent destination verification.
+
+Use `scripts/inventory.py` and `scripts/compare_inventories.py` before durable promotion. After upload, pass the credential over stdin to `scripts/verify_hf.py`; it checks authorized visibility, exact filename and size sets, downloaded metadata SHA256, exposed LFS SHA256, and the resolved commit.
 
 ## Failure Matrix
 
