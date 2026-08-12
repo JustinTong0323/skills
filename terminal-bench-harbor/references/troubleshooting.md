@@ -92,15 +92,32 @@ Inspect agent requests and server validation errors, probe every observed effort
 
 Harbor 0.20.0 appends the escaped instruction directly after Pi flags without `--`. A task instruction beginning with `- ` becomes an unknown option. Confirm the instruction and agent log; classify it as a stock-adapter harness failure.
 
+This failure is deterministic. Harbor rebuilds an identical command every run, so the task fails the same way on every attempt and the model never attempts it at all. One task reproduced it three times out of three, then passed on a patched adapter. See the file-argument remedy in [harnesses.md](harnesses.md).
+
 Task filters also require full package names:
 
 ```text
 terminal-bench/nginx-request-logging
 ```
 
-## Pi exits 137 after `pkill -f`
+## Pi exits 143 or 137 after a pattern kill
 
-The full task instruction is present in the long-lived Pi argv. If the agent runs `pkill -9 -f NAME` and `NAME` appears in the instruction, Pi matches and kills itself. Confirm process argv and absence of a host/kernel OOM event before classifying it.
+The full task instruction is present in the long-lived Pi argv. If the agent runs a pattern kill whose pattern appears in that instruction, Pi matches itself and dies:
+
+- a plain `pkill -f NAME` sends SIGTERM, so the trial reports **exit 143**;
+- `pkill -9 -f NAME` sends SIGKILL, so it reports exit 137.
+
+Exit 143 is the case observed in practice, three times in one campaign. Search agent logs for both codes, and for executed `pkill`, `pgrep`, and `killall` commands. Confirm the process argv and rule out a host or kernel OOM before classifying.
+
+The exposed set is every task whose instruction names a file, not the tasks whose instruction mentions a kill command. The agent invents the kill; the instruction only has to supply the filename, which ordinary cleanup then matches. In one campaign the kill interrupted a `pkill -f NAME; sleep 2; pgrep ...; rm -rf ...` cleanup sequence, which is why such trials can leave odd container state.
+
+The failure is stochastic and can change error class between attempts. One task went timeout, then self-kill, then timeout across three attempts, while another self-killed once and later passed. The harness tax is therefore a per-run lottery rather than a fixed set of tasks to subtract. Report a harness-adjusted score only for deterministic failures, and attach the attempt number to any adjustment.
+
+## Estimating harness tax before a run
+
+A scan of instruction text can find deterministic harness failures, such as instructions beginning with `- `. It cannot bound agent-triggered ones, because the agent's own commands are not in the instruction.
+
+Report such a scan as a lower bound on deterministic tax only, never as "the harness tax is N tasks". On one TB2.1 run the scan found no kill-command mentions and predicted a tax of exactly one task; the run then produced that one deterministic failure plus a stream of self-kills the scan could not see.
 
 ## High GPU utilization
 
