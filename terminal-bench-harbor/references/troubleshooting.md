@@ -44,6 +44,14 @@ Harbor 0.20.0 can stop awaiting an agent without reliably killing every containe
 
 Changing or removing the deadline changes benchmark semantics. Preserve the bounded job and use a new job for an explicitly unbounded experiment.
 
+## The same tasks stop timing out when rerun alone
+
+A rerun of only the errored tasks fills fewer concurrent slots, so it runs at materially lighter load. When timeouts vanish under that lighter queue, contention in the parent run was the dominant cause and the parent score is a floor rather than a measurement.
+
+One campaign measured this directly: a c32 run produced 4 timeouts in one arm and 18 in the other; rerunning only those tasks eliminated 4 of 4 and 13 of 18. Per-stream throughput was 382 tokens per second idle against about 139 at c32.
+
+Do not respond by raising `agent_timeout_multiplier`, which changes benchmark semantics. Either accept the score as deadline-limited and label it, or rerun every task at lower concurrency for a comparable number. Report the lighter effective load of any subset rerun as a known confound rather than treating its outcomes as equivalent draws.
+
 ## Effectively unbounded agent phase never finishes
 
 `--agent-timeout-multiplier 1000000000` prevents Harbor from resolving agent-created subprocess waits. Examples include a foreground service piped to `tail`, an engine waiting on a protocol read, or a long search loop.
