@@ -7,9 +7,10 @@ Define site-local values outside shared source control:
 ```bash
 export CONVERSION_ROOT="<workspace>"
 export MODELOPT_ROOT="<modelopt-checkout>"
+export REQUESTED_MODELOPT_REF="<commit-or-moving-ref>"
 export SOURCE_CHECKPOINT="<read-only-bf16-checkpoint>"
 export REFERENCE_CONFIG="<compatible-quantized-config-json>"
-export STAGING_CHECKPOINT="<staging-directory>"
+export GENERATIONS_ROOT="<staging-root>/generations"
 export OUTPUT_CHECKPOINT="<final-output-directory>"
 export PYTHON_BIN="<isolated-python>"
 ```
@@ -18,7 +19,7 @@ Require:
 
 - `SOURCE_CHECKPOINT` contains a valid config and safetensors index.
 - `OUTPUT_CHECKPOINT` does not exist.
-- Staging and output are on the same filesystem.
+- The selected generation directory and output are on the same filesystem.
 - The canonical source remains read-only.
 - Available capacity covers routed parts, assembly output, temporary export, and filesystem headers.
 
@@ -28,7 +29,9 @@ Do not mix tensor payload bytes from index metadata with on-disk safetensors fil
 
 ```bash
 git clone https://github.com/NVIDIA/Model-Optimizer.git "$MODELOPT_ROOT"
-git -C "$MODELOPT_ROOT" checkout 87c9f8cf83021957d1a1a575c90c9a4eaaf7ef0c
+git -C "$MODELOPT_ROOT" fetch origin "$REQUESTED_MODELOPT_REF"
+RESOLVED_MODELOPT_COMMIT="$(git -C "$MODELOPT_ROOT" rev-parse 'FETCH_HEAD^{commit}')"
+git -C "$MODELOPT_ROOT" checkout --detach "$RESOLVED_MODELOPT_COMMIT"
 
 python3 -m venv --system-site-packages "$CONVERSION_ROOT/venv"
 export PYTHON_BIN="$CONVERSION_ROOT/venv/bin/python"
@@ -50,7 +53,9 @@ Run every conversion command with `PYTHONNOUSERSITE=1`, `TOKENIZERS_PARALLELISM=
 
 ## Metadata Preflight
 
-The preflight tool must use config, index, and `safe_open(...).get_slice()` metadata. It must not materialize the full checkpoint.
+The preflight tool must use config, index, and `safe_open(...).get_slice()` metadata. It must not materialize the full checkpoint. Resolve requested moving revisions, bind every source file that conversion or calibration will read, record the normalized conversion environment, hash conversion artifacts, and finalize the immutable conversion manifest before producing any part.
+
+Discover the text-config path and backbone prefix before resolving any tensor key. Require one unambiguous prefix that covers every layer and required calibration tensor. Support flat and nested text configs, require equal values for duplicated architecture fields, and store the normalized layout in the manifest. Every later stage must consume that recorded mapping rather than rediscovering or hard-coding it.
 
 For every layer, verify the fused source shapes:
 
@@ -59,7 +64,7 @@ gate_up_proj: [num_experts, 2 * moe_intermediate_size, hidden_size]
 down_proj:    [num_experts, hidden_size, moe_intermediate_size]
 ```
 
-Require BF16 input tensors, record their source shard names, enumerate the complete non-routed key set, and verify all expected MTP keys are outside the routed set.
+Require BF16 input tensors, record their source shard names, enumerate the complete non-routed key set, and verify all expected MTP keys are outside the routed set. Inventory auxiliary tokenizer, processor, generation, template, and remote-code files with relative path, declared origin, size, and SHA256.
 
 ## Real-Weight Dry Run
 
@@ -72,14 +77,13 @@ env \
   TOKENIZERS_PARALLELISM=false \
   "$PYTHON_BIN" <STREAMING_EXPORTER> \
     --source "$SOURCE_CHECKPOINT" \
-    --reference-config "$REFERENCE_CONFIG" \
-    --staging "$STAGING_CHECKPOINT" \
+    --staging "<generation-directory>" \
     --layers 0 \
     --expert-range 0:1 \
     --dry-run
 ```
 
-Record the dry-run part and marker hashes. The full coordinator must require that marker's source, Model Optimizer, recipe, and calibration identities.
+Set the generation directory to `GENERATIONS_ROOT/<conversion_manifest_sha256>`, then record the dry-run part and marker hashes there. The full coordinator must require the marker's exact conversion-manifest digest.
 
 ## Full Conversion
 
@@ -113,7 +117,7 @@ One worker must never retain allocations from an earlier layer while starting th
 
 ## Supervision And Resume
 
-For each layer, require all four disjoint marker ranges before advancing or releasing staged source shards. Track:
+For each layer, require all four disjoint marker ranges and the exact conversion-manifest digest before advancing or releasing staged source shards. Track:
 
 - Worker PID, rank, GPU, current layer, and expert range.
 - Exit code and last successful marker per worker.
@@ -122,11 +126,13 @@ For each layer, require all four disjoint marker ranges before advancing or rele
 - Staging and source capacity.
 - Part count, marker count, byte growth, and latest verified completion time.
 
-On restart, recompute the expected identity. Reuse a part only when the complete marker identity, part size, and part SHA256 match. Move stale or partial files to quarantine rather than overwriting evidence.
+Provide two distinct entry points: resume an explicit generation digest, or start from requested refs. Resume never fetches or resolves `latest`; it verifies the selected immutable conversion manifest and reuses a part only when the marker digest, part size, and part SHA256 match. Starting from requested refs resolves them again and creates a new generation if the conversion-manifest digest differs. It never scans older generations for parts. Move partial files inside the selected generation to quarantine rather than overwriting evidence.
 
 ## CPU Assembly
 
 Assembly does not require a GPU, but it is storage and host-memory intensive.
+
+Resolve moving assembly inputs once and freeze `assembly_request_sha256` before writing output. The request references one conversion generation but has its own identity, so a new reference config, assembler, or metadata revision can reuse verified routed parts without pretending to be the earlier assembly. Finalize `assembly_manifest_sha256` only after independently rereading the staged output and recording its identities.
 
 ```bash
 env \
@@ -135,23 +141,35 @@ env \
   "$PYTHON_BIN" <ASSEMBLER> \
     --source "$SOURCE_CHECKPOINT" \
     --reference-config "$REFERENCE_CONFIG" \
-    --staging "$STAGING_CHECKPOINT" \
+    --staging "<generation-directory>" \
     --output "$OUTPUT_CHECKPOINT" \
     --mtp-policy keep-bf16
 ```
 
 The assembler must:
 
-1. Re-hash and inspect every routed part and marker.
+1. Verify the conversion manifest and assembly request, then re-hash and inspect every routed part and marker.
 2. Reject duplicate, missing, overlapping, or out-of-range global tensor keys.
 3. Exclude the original fused BF16 routed tensors only after every replacement is verified.
-4. Copy every other source tensor unchanged, including MTP.
-5. Preserve auxiliary tokenizer and remote-code files without copying source safetensors or the old index.
+4. Copy every other source tensor unchanged, including MTP, and record a canonical content digest for each logical tensor.
+5. Copy the declared auxiliary metadata inventory without copying source safetensors or the old index; require every copied size and SHA256 to match.
 6. Merge the reference and exported ignore lists with all MTP exclusions.
 7. Remove KV-cache quantization fields from both modern and legacy quantization config forms.
 8. Write a unique complete safetensors index and correct tensor-payload byte total.
 9. Validate the staging checkpoint before publication.
 10. Atomically rename staging to the final output on the same filesystem.
+
+Define a logical tensor digest as SHA256 over an unambiguous dtype tag, shape encoding, and contiguous raw tensor bytes. Compute it from each source non-routed tensor while assembly already has that tensor in memory. Independently reopen the completed output shards, recompute every digest, and require per-key equality before publication. File-level hashes are insufficient because assembly may reshard tensors.
+
+Store the assembly-request digest, final checkpoint-payload inventory, per-file hashes, and per-tensor non-routed digests in the immutable assembly manifest. Exclude provenance records from the payload inventory so the manifest never hashes itself; qualification and publication inventory those records separately. Qualification must reference that exact assembly digest rather than rediscovering a moving output path.
+
+## Auxiliary Metadata
+
+Choose one declared metadata origin for each assembly. The default is the exact source checkpoint revision used for conversion. A later canonical release may be used only as a separate metadata-alignment operation after tensor equivalence or an explicit compatibility boundary has been established; do not silently mix files from moving repository heads.
+
+Treat `chat_template.jinja`, any chat template embedded in `tokenizer_config.json`, tokenizer files, processor files, `generation_config.json`, remote code, and model config as behavior-bearing artifacts. Parse the standalone template and render representative text, tool-call, and supported thinking-mode inputs. If standalone and embedded templates differ, record which entry point the target runtime selects and either align them or preserve the difference as an explicit compatibility decision.
+
+A post-conversion metadata alignment must create a new checkpoint or repository revision. Record before-and-after inventories and prove that all safetensors, the safetensors index, and quantization metadata are unchanged. Rerun template parse/render and API smoke gates after alignment; weight reconversion is unnecessary when only verified auxiliary metadata changes.
 
 If the target loader ignores nested paths in the index, create collision-checked root-level hard links and atomically rewrite the index to basenames. Verify inode identity before the rewrite. Do not duplicate terabytes of payload merely to change layout.
 
