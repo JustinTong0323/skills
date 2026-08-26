@@ -23,6 +23,8 @@ def quantized_layers(output: Path, contract: Path | None) -> tuple[dict[str, dic
 
 
 def expected_forms(algorithm: str) -> dict[str, str]:
+    if algorithm == "NVFP4":
+        return {"weight": "U8", "weight_scale": "F8_E4M3", "weight_scale_2": "F32", "input_scale": "F32"}
     if algorithm == "W4A16_NVFP4":
         return {"weight": "U8", "weight_scale": "F8_E4M3", "weight_scale_2": "F32"}
     if algorithm == "FP8":
@@ -38,7 +40,7 @@ def validate_shape(
     form: str,
     output_shape: list[int],
 ) -> None:
-    if algorithm == "W4A16_NVFP4":
+    if algorithm in ("NVFP4", "W4A16_NVFP4"):
         if len(source_shape) != 2 or source_shape[1] % 2:
             raise ValueError(f"NVFP4 source weight must be rank-2 with even input width: {base}")
         if not isinstance(group_size, int) or group_size <= 0 or source_shape[1] % group_size:
@@ -47,6 +49,7 @@ def validate_shape(
             "weight": [source_shape[0], source_shape[1] // 2],
             "weight_scale": [source_shape[0], source_shape[1] // group_size],
             "weight_scale_2": [],
+            "input_scale": [],
         }[form]
     else:
         expected = source_shape if form == "weight" else []

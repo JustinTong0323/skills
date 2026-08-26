@@ -157,7 +157,7 @@ Independently reopen config, optional index, and every weight file. Require:
 1. Exact equality between the logical key map and physical tensor keys, with no duplicate JSON keys or orphan shards.
 2. Tensor coverage, shapes, and dtypes derived from the actual recipe and source architecture.
 3. Quantized module counts matching normalized `hf_quant_config.json` or equivalent metadata.
-4. Correct NVFP4 packing/group size and finite, strictly positive scale tensors.
+4. Correct NVFP4 packing/group size and finite, strictly positive scale tensors, including one F32 `input_scale` per W4A4 `NVFP4` base — its absence marks a W4A16 export regardless of labels.
 5. Exact logical content equality for every tensor expected to remain unchanged, including MTP.
 6. No temporary, partial, or incomplete artifact.
 7. Complete source and output file inventories with content hashes.
@@ -174,7 +174,8 @@ Run:
 
 - Health and deterministic exact-answer smoke with finite logprobs and `finish_reason=stop`.
 - MTP/NEXTN smoke and acceptance evidence when the release recipe enables it.
-- The complete predeclared task evaluation, gating on accuracy, stop rate, truncation, request errors, and empty generations.
+- The complete predeclared task evaluation, gating on accuracy, stop rate, truncation, request errors, and empty generations. For reasoning models, also gate on the thinking-length distribution and one agentic long-horizon benchmark with an explicit `max_tokens`.
+- Release-affecting comparisons follow the paired multi-seed statistical protocol with a predeclared non-inferiority margin; never gate on single-seed deltas.
 - Final cgroup/GPU OOM audit.
 
 Write an immutable qualification record with raw-result hashes and an explicit pass, fail, or waiver verdict.

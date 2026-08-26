@@ -290,6 +290,55 @@ class ToolTests(unittest.TestCase):
             self.assertNotEqual(failed.returncode, 0)
             self.assertIn("non-positive scale values", failed.stderr)
 
+    def test_w4a4_checkpoint_audit_requires_input_scale(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            output.mkdir()
+            write_json(source / "config.json", {"architectures": ["DenseModel"], "model_type": "dense"})
+            layer_map = {"nv4": {"group_size": 4, "quant_algo": "NVFP4"}}
+            quantization = {"quant_algo": "NVFP4", "quantized_layers": layer_map}
+            write_json(
+                output / "config.json",
+                {
+                    "architectures": ["DenseModel"],
+                    "model_type": "dense",
+                    "quantization_config": quantization,
+                },
+            )
+            save_file(
+                {"nv4.weight": torch.arange(8, dtype=torch.bfloat16).reshape(2, 4)},
+                source / "model.safetensors",
+            )
+            output_tensors = {
+                "nv4.weight": torch.ones((2, 2), dtype=torch.uint8),
+                "nv4.weight_scale": torch.ones((2, 1), dtype=torch.float8_e4m3fn),
+                "nv4.weight_scale_2": torch.tensor(1.0),
+                "nv4.input_scale": torch.tensor(2.0),
+            }
+            save_file(output_tensors, output / "model.safetensors")
+            write_json(output / "hf_quant_config.json", {"quantization": quantization})
+            report = json.loads(
+                run_tool("audit_checkpoint.py", "--source", str(source), "--output-checkpoint", str(output)).stdout
+            )
+            self.assertEqual(report["algorithm_base_counts"], {"NVFP4": 1})
+            self.assertEqual(report["verdict"], "pass")
+
+            del output_tensors["nv4.input_scale"]
+            save_file(output_tensors, output / "model.safetensors")
+            failed = run_tool(
+                "audit_checkpoint.py",
+                "--source",
+                str(source),
+                "--output-checkpoint",
+                str(output),
+                check=False,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("missing quantized tensor", failed.stderr)
+
     def test_compare_inventories_reports_changed_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

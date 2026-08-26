@@ -64,10 +64,15 @@ Copy the chosen recipe before adding exclusions. Never mutate a shared global re
 
 The precision contract must enumerate every module base and one of:
 
-- `W4A16_NVFP4`, including group size and output packed/scale dtypes.
+- `NVFP4` (W4A4), including group size and output packed/scale dtypes. Every quantized base must carry a finite, strictly positive F32 `input_scale` in addition to the packed U8 weight, FP8 E4M3 group scales, and F32 global scale.
+- `W4A16_NVFP4`, including group size and output packed/scale dtypes. A W4A16 base has no `input_scale`.
 - `FP8`, including expected weight and scale forms.
 - Source dtype, content unchanged.
 - Excluded from quantization for a documented reason.
+
+The per-base `input_scale` is the structural difference between W4A4 and W4A16. Never relabel a `W4A16_NVFP4` export as `NVFP4` by editing metadata; a W4A4 product requires a fresh conversion from the floating-point source with an activation-quantizing recipe. The audit rejects a missing `input_scale` on an `NVFP4` base and a stray one on a `W4A16_NVFP4` base.
+
+Decide the product before choosing the recipe: `NVFP4` serving requires SM100+ hardware, while `W4A16_NVFP4` takes the Marlin FP4-A16 path with BF16 activations and does not use the native Blackwell FP4 GEMM. Do not quantize routers to a higher dtype than their source; an on-disk BF16 router upcast to FP32 buys nothing and costs measurable throughput.
 
 Treat KV-cache quantization separately from weight conversion. A recipe name ending in `kv_fp8_cast` may write only metadata and no per-layer KV scale tensors. Audit what was exported, then record the runtime behavior. Do not claim calibrated KV scales when the runtime reports fallback scales of `1.0`.
 
@@ -82,7 +87,9 @@ Freeze before conversion:
 - Prompt/text extraction and preprocessing code identity.
 - Architecture-specific forward kwargs.
 
-Use production-representative text or activation data. Random Gaussian calibration is not a substitute. For a new model family, first compare calibration activation ranges with representative real traffic.
+Use production-representative text or activation data. Random Gaussian calibration is not a substitute — Gaussian input has produced 5x scale saturation with degenerate repetitive output while still passing every structural audit. Structure checks never prove calibration quality. For a new model family, first compare calibration activation ranges with representative real traffic, then gate the frozen pool with a probe: run a small target-distribution sample (for example GSM8K-style prompts) and require the probe activation amax to fall inside the calibration pool amax.
+
+Architectures without a post-attention RMSNorm cannot synthesize calibration from embedding rows plus a norm; capture real activations from the serving path instead. See [whole-model-ptq.md](whole-model-ptq.md) for capture pitfalls.
 
 A production whole-model reference that passed one dense hybrid Qwen-family conversion used 1,024 `cnn_dailymail` train samples, sequence length 512, batch size 1, seed 1234, and max calibration. This is evidence for that recipe and family, not a universal default.
 
