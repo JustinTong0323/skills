@@ -80,11 +80,16 @@ MTP policy must be explicit. If excluded, require source-identical content. If q
 
 ### Optional Adaptive Block Scaling (4/6)
 
-Adaptive block scaling ("Four Over Six", arXiv:2512.02010) quantizes each 16-value block twice — scaled to a maximum of 6 and of 4 — and keeps the version with lower per-block MSE, reducing error on the near-maximal values that dominate NVFP4 degradation. The exported format is unchanged (packed E2M1, E4M3 block scales, FP32 tensor scale, with the tensor scale derived from an E4M3 bound of 256 instead of 448), so runtime kernels and the tensor audit contract are unaffected; only scale selection changes.
+Adaptive block scaling ("Four Over Six", arXiv:2512.02010) quantizes each weight block twice — scaled to a maximum of 6 and of 4 — and keeps the version with lower per-block MSE, reducing error on the near-maximal values that dominate NVFP4 degradation. The exported format is unchanged (packed E2M1, E4M3 block scales, FP32 tensor scale, with block scales normalized by 256 instead of 448 for M=4 headroom), so runtime kernels and the tensor audit contract are unaffected; only scale selection changes.
 
-Use it only when the pinned, unmodified Model Optimizer or another hash-recorded, unmodified quantizer artifact implements it. A local ModelOpt patch or an ad-hoc requantization script violates the dependency boundary; such an implementation must first be qualified as a separate conversion artifact through the full gate chain. Declare the variant in the conversion manifest as part of recipe identity — output bytes change, so it is a new generation requiring full requalification.
+Model Optimizer 0.46.0 added an official implementation, `mtq.NVFP4_FOUR_OVER_SIX_CFG`, usable through `mtq.quantize` with HF or Megatron export. Two sharp edges:
 
-Published PTQ gains are perplexity and simple-task results on small dense models, and the method degraded GPTQ-based quantization in the same study. Do not combine it with second-order optimization recipes, and do not adopt it for a release without a controlled A/B against the standard recipe under the paired multi-seed protocol, thinking-length distribution, and agentic benchmark in [validation-and-release.md](validation-and-release.md). It complements, and does not replace, sensitive-layer exemption.
+- It is weight-side only; activations stay on ordinary dynamic NVFP4.
+- `mtq.compress` does not preserve the per-block M=4/M=6 choice — export through `mtq.quantize` paths only.
+
+The known-good reference commit earlier in this document predates 0.46 and does not contain the config. Advancing Model Optimizer to obtain it is an environment change: resolve a new exact commit and treat the run as a new conversion generation. Never backport the feature into the pinned checkout.
+
+Declare the variant in the conversion manifest as part of recipe identity — output bytes change, so it requires full requalification. Published PTQ gains are perplexity and simple-task results on small dense models, and the method degraded GPTQ-based quantization in the same study. Do not combine it with second-order optimization recipes, and do not adopt it for a release without a controlled A/B against the standard recipe under the paired multi-seed protocol, thinking-length distribution, and agentic benchmark in [validation-and-release.md](validation-and-release.md). It complements, and does not replace, sensitive-layer exemption.
 
 ## Calibration Contract
 
