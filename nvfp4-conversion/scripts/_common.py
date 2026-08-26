@@ -26,6 +26,8 @@ def write_json(path: Path | None, value: Any) -> None:
     if path is None:
         print(payload, end="")
         return
+    if path.exists() and path.read_text() != payload:
+        raise ValueError(f"refusing to overwrite existing file with different content: {path}")
     path.write_text(payload)
 
 
@@ -49,10 +51,12 @@ def checkpoint_layout(root: Path) -> dict[str, Any]:
     safe_open = require_safetensors()
     if not root.is_dir():
         raise ValueError(f"checkpoint directory does not exist: {root}")
+    incomplete_markers = (".tmp", ".partial", ".incomplete")
     incomplete_files = sorted(
-        path.name
-        for path in root.iterdir()
-        if path.is_file() and path.name.endswith((".tmp", ".partial", ".incomplete"))
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file()
+        and any(path.name.endswith(marker) or f"{marker}." in path.name for marker in incomplete_markers)
     )
     if incomplete_files:
         raise ValueError(f"checkpoint contains incomplete files: {incomplete_files}")

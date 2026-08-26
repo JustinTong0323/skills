@@ -1,6 +1,6 @@
 # Routed-Expert Streaming And Assembly
 
-Use this path only when whole-model conversion does not fit and the source contains supported fused routed experts. Quantize one model layer and one expert partition per worker, then assemble all unchanged tensors on CPU.
+Use this path only when whole-model conversion does not fit or is unsupported, and the source contains supported fused routed experts. Quantize one model layer and one expert partition per worker, then assemble all unchanged tensors on CPU.
 
 ## Supported Layout
 

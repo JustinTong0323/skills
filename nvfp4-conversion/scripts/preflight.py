@@ -38,7 +38,9 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_json(args.checkpoint / "config.json")
-    if (args.checkpoint / "hf_quant_config.json").exists() or config.get("quantization_config"):
+    text_config = config.get("text_config")
+    nested_quantization = text_config.get("quantization_config") if isinstance(text_config, dict) else None
+    if (args.checkpoint / "hf_quant_config.json").exists() or config.get("quantization_config") or nested_quantization:
         raise ValueError("source checkpoint is already quantized")
     layout = checkpoint_layout(args.checkpoint)
     metadata = layout["tensor_metadata"]
@@ -65,8 +67,8 @@ def main() -> None:
         shapes_compatible = all(
             len(projections["gate_up_proj"]["shape"]) == 3
             and len(projections["down_proj"]["shape"]) == 3
-            and projections["gate_up_proj"]["dtype"] in {"BF16", "F16"}
-            and projections["down_proj"]["dtype"] in {"BF16", "F16"}
+            and projections["gate_up_proj"]["dtype"] == "BF16"
+            and projections["down_proj"]["dtype"] == "BF16"
             and projections["gate_up_proj"]["shape"][0] == projections["down_proj"]["shape"][0]
             and projections["gate_up_proj"]["shape"][1] == 2 * projections["down_proj"]["shape"][2]
             and projections["gate_up_proj"]["shape"][2] == projections["down_proj"]["shape"][1]

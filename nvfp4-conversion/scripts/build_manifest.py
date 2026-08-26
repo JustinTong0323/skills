@@ -37,8 +37,8 @@ def main() -> None:
     parser.add_argument("--precision-contract", type=Path, required=True)
     parser.add_argument("--topology", type=Path, required=True)
     parser.add_argument("--artifact", type=Path, action="append", default=[])
-    parser.add_argument("--source-repository")
-    parser.add_argument("--source-revision")
+    parser.add_argument("--source-repository", required=True)
+    parser.add_argument("--source-revision", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 

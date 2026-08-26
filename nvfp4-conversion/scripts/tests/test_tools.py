@@ -207,6 +207,10 @@ class ToolTests(unittest.TestCase):
                 str(topology),
                 "--artifact",
                 str(artifact),
+                "--source-repository",
+                "example/repo",
+                "--source-revision",
+                "abc123",
             ]
             run_tool("build_manifest.py", *common, "--output", str(first))
             run_tool("build_manifest.py", *common, "--output", str(second))
@@ -227,7 +231,7 @@ class ToolTests(unittest.TestCase):
             write_json(source / "config.json", {"architectures": ["DenseModel"], "model_type": "dense"})
             layer_map = {
                 "fp": {"quant_algo": "FP8"},
-                "nv": {"group_size": 4, "quant_algo": "W4A16_NVFP4"},
+                "nv": {"group_size": 16, "quant_algo": "W4A16_NVFP4"},
             }
             write_json(
                 output / "config.json",
@@ -244,7 +248,7 @@ class ToolTests(unittest.TestCase):
             source_tensors = {
                 "fp.weight": torch.arange(8, dtype=torch.bfloat16).reshape(2, 4),
                 "mtp.weight": torch.tensor([1.0, 2.0], dtype=torch.bfloat16),
-                "nv.weight": torch.arange(8, dtype=torch.bfloat16).reshape(2, 4),
+                "nv.weight": torch.arange(32, dtype=torch.bfloat16).reshape(2, 16),
                 "unchanged.weight": torch.tensor([3.0, 4.0], dtype=torch.bfloat16),
             }
             save_file(source_tensors, source / "model.safetensors")
@@ -253,7 +257,7 @@ class ToolTests(unittest.TestCase):
                 "fp.weight": torch.ones((2, 4), dtype=torch.float8_e4m3fn),
                 "fp.weight_scale": torch.tensor(1.0),
                 "mtp.weight": source_tensors["mtp.weight"],
-                "nv.weight": torch.ones((2, 2), dtype=torch.uint8),
+                "nv.weight": torch.ones((2, 8), dtype=torch.uint8),
                 "nv.weight_scale": torch.ones((2, 1), dtype=torch.float8_e4m3fn),
                 "nv.weight_scale_2": torch.tensor(1.0),
                 "unchanged.weight": source_tensors["unchanged.weight"],
@@ -298,7 +302,7 @@ class ToolTests(unittest.TestCase):
             source.mkdir()
             output.mkdir()
             write_json(source / "config.json", {"architectures": ["DenseModel"], "model_type": "dense"})
-            layer_map = {"nv4": {"group_size": 4, "quant_algo": "NVFP4"}}
+            layer_map = {"nv4": {"group_size": 16, "quant_algo": "NVFP4"}}
             quantization = {"quant_algo": "NVFP4", "quantized_layers": layer_map}
             write_json(
                 output / "config.json",
@@ -309,11 +313,11 @@ class ToolTests(unittest.TestCase):
                 },
             )
             save_file(
-                {"nv4.weight": torch.arange(8, dtype=torch.bfloat16).reshape(2, 4)},
+                {"nv4.weight": torch.arange(32, dtype=torch.bfloat16).reshape(2, 16)},
                 source / "model.safetensors",
             )
             output_tensors = {
-                "nv4.weight": torch.ones((2, 2), dtype=torch.uint8),
+                "nv4.weight": torch.ones((2, 8), dtype=torch.uint8),
                 "nv4.weight_scale": torch.ones((2, 1), dtype=torch.float8_e4m3fn),
                 "nv4.weight_scale_2": torch.tensor(1.0),
                 "nv4.input_scale": torch.tensor(2.0),
@@ -338,6 +342,213 @@ class ToolTests(unittest.TestCase):
             )
             self.assertNotEqual(failed.returncode, 0)
             self.assertIn("missing quantized tensor", failed.stderr)
+
+    def test_nvfp4_group_size_must_be_16(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            output.mkdir()
+            write_json(source / "config.json", {"architectures": ["DenseModel"], "model_type": "dense"})
+            layer_map = {"nv": {"group_size": 8, "quant_algo": "W4A16_NVFP4"}}
+            quantization = {"quant_algo": "W4A16_NVFP4", "quantized_layers": layer_map}
+            write_json(
+                output / "config.json",
+                {
+                    "architectures": ["DenseModel"],
+                    "model_type": "dense",
+                    "quantization_config": quantization,
+                },
+            )
+            save_file({"nv.weight": torch.zeros((2, 16), dtype=torch.bfloat16)}, source / "model.safetensors")
+            save_file(
+                {
+                    "nv.weight": torch.ones((2, 8), dtype=torch.uint8),
+                    "nv.weight_scale": torch.ones((2, 2), dtype=torch.float8_e4m3fn),
+                    "nv.weight_scale_2": torch.tensor(1.0),
+                },
+                output / "model.safetensors",
+            )
+            write_json(output / "hf_quant_config.json", {"quantization": quantization})
+            failed = run_tool(
+                "audit_checkpoint.py",
+                "--source",
+                str(source),
+                "--output-checkpoint",
+                str(output),
+                check=False,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("invalid NVFP4 group_size", failed.stderr)
+
+    def test_fused_rank3_expert_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            output.mkdir()
+            write_json(source / "config.json", {"architectures": ["MoeModel"], "model_type": "moe"})
+            gate_base = "model.layers.0.mlp.experts.gate_up_proj"
+            down_base = "model.layers.0.mlp.experts.down_proj"
+            layer_map = {
+                gate_base: {"group_size": 16, "quant_algo": "W4A16_NVFP4"},
+                down_base: {"group_size": 16, "quant_algo": "W4A16_NVFP4"},
+            }
+            quantization = {"quant_algo": "W4A16_NVFP4", "quantized_layers": layer_map}
+            write_json(
+                output / "config.json",
+                {
+                    "architectures": ["MoeModel"],
+                    "model_type": "moe",
+                    "quantization_config": quantization,
+                },
+            )
+            save_file(
+                {
+                    f"{gate_base}.weight": torch.zeros((2, 32, 16), dtype=torch.bfloat16),
+                    f"{down_base}.weight": torch.zeros((2, 16, 16), dtype=torch.bfloat16),
+                },
+                source / "model.safetensors",
+            )
+            save_file(
+                {
+                    f"{gate_base}.weight": torch.ones((2, 32, 8), dtype=torch.uint8),
+                    f"{gate_base}.weight_scale": torch.ones((2, 32, 1), dtype=torch.float8_e4m3fn),
+                    f"{gate_base}.weight_scale_2": torch.tensor(1.0),
+                    f"{down_base}.weight": torch.ones((2, 16, 8), dtype=torch.uint8),
+                    f"{down_base}.weight_scale": torch.ones((2, 16, 1), dtype=torch.float8_e4m3fn),
+                    f"{down_base}.weight_scale_2": torch.tensor(1.0),
+                },
+                output / "model.safetensors",
+            )
+            write_json(output / "hf_quant_config.json", {"quantization": quantization})
+            report = json.loads(
+                run_tool("audit_checkpoint.py", "--source", str(source), "--output-checkpoint", str(output)).stdout
+            )
+            self.assertEqual(report["algorithm_base_counts"], {"W4A16_NVFP4": 2})
+            self.assertEqual(report["verdict"], "pass")
+
+    def test_protected_quantization_requires_explicit_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            output.mkdir()
+            write_json(source / "config.json", {"architectures": ["DenseModel"], "model_type": "dense"})
+            layer_map = {
+                "mtp": {"group_size": 16, "quant_algo": "W4A16_NVFP4"},
+                "ok": {"group_size": 16, "quant_algo": "W4A16_NVFP4"},
+            }
+            quantization = {"quant_algo": "W4A16_NVFP4", "quantized_layers": layer_map}
+            write_json(
+                output / "config.json",
+                {
+                    "architectures": ["DenseModel"],
+                    "model_type": "dense",
+                    "quantization_config": quantization,
+                },
+            )
+            save_file(
+                {
+                    "mtp.weight": torch.zeros((2, 16), dtype=torch.bfloat16),
+                    "ok.weight": torch.zeros((2, 16), dtype=torch.bfloat16),
+                },
+                source / "model.safetensors",
+            )
+            save_file(
+                {
+                    "mtp.weight": torch.ones((2, 8), dtype=torch.uint8),
+                    "mtp.weight_scale": torch.ones((2, 1), dtype=torch.float8_e4m3fn),
+                    "mtp.weight_scale_2": torch.tensor(1.0),
+                    "ok.weight": torch.ones((2, 8), dtype=torch.uint8),
+                    "ok.weight_scale": torch.ones((2, 1), dtype=torch.float8_e4m3fn),
+                    "ok.weight_scale_2": torch.tensor(1.0),
+                },
+                output / "model.safetensors",
+            )
+            write_json(output / "hf_quant_config.json", {"quantization": quantization})
+            failed = run_tool(
+                "audit_checkpoint.py",
+                "--source",
+                str(source),
+                "--output-checkpoint",
+                str(output),
+                check=False,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("protected modules appear in quantized_layers", failed.stderr)
+            report = json.loads(
+                run_tool(
+                    "audit_checkpoint.py",
+                    "--source",
+                    str(source),
+                    "--output-checkpoint",
+                    str(output),
+                    "--allow-quantized-protected",
+                ).stdout
+            )
+            self.assertEqual(report["quantized_protected_bases"], ["mtp"])
+            self.assertEqual(report["verdict"], "pass")
+
+    def test_preflight_rejects_nested_quantization_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_json(
+                root / "config.json",
+                {
+                    "architectures": ["DenseModel"],
+                    "model_type": "dense",
+                    "text_config": {"model_type": "dense_text", "quantization_config": {"quant_algo": "NVFP4"}},
+                },
+            )
+            save_file({"weight": torch.ones(2, dtype=torch.bfloat16)}, root / "model.safetensors")
+            failed = run_tool("preflight.py", str(root), check=False)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("already quantized", failed.stderr)
+
+    def test_routed_preflight_requires_bf16(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_json(root / "config.json", {"architectures": ["MoeModel"], "model_type": "moe", "num_hidden_layers": 1})
+            save_file(
+                {
+                    "model.layers.0.mlp.experts.gate_up_proj.weight": torch.ones((4, 8, 4), dtype=torch.float16),
+                    "model.layers.0.mlp.experts.down_proj.weight": torch.ones((4, 4, 4), dtype=torch.float16),
+                },
+                root / "model.safetensors",
+            )
+            report = json.loads(
+                run_tool(
+                    "preflight.py",
+                    str(root),
+                    "--modelopt-supported",
+                    "no",
+                    "--whole-model-fit",
+                    "no",
+                    "--routed-exporter-qualified",
+                    "yes",
+                    "--expected-routed-layers",
+                    "0",
+                ).stdout
+            )
+            self.assertFalse(report["routed_expert"]["compatible"])
+            self.assertEqual(report["decision"], "unsupported")
+
+    def test_incomplete_infix_file_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_json(root / "config.json", {"architectures": ["DenseModel"], "model_type": "dense"})
+            save_file({"weight": torch.ones(2)}, root / "model.safetensors")
+            (root / "model.tmp.safetensors").write_text("partial")
+            staging = root / "staging"
+            staging.mkdir()
+            (staging / "shard.partial").write_text("partial")
+            failed = run_tool("inventory.py", str(root), check=False)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("incomplete files", failed.stderr)
 
     def test_compare_inventories_reports_changed_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

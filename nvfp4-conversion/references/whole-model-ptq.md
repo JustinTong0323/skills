@@ -23,7 +23,7 @@ Resolve `REQUESTED_MODELOPT_REF` to an exact detached commit. Run conversion wit
 Find the architecture-specific Model Optimizer example and recipe at the pinned commit. Read both the example entry point and the recipe body. Establish:
 
 - Supported Transformers model class and config structure.
-- Load/device-map behavior and required trust-remote-code policy.
+- Load/device-map behavior and required trust-remote-code policy. When `trust_remote_code` is required, read the remote-code files first — loading executes checkpoint-supplied Python on the conversion host with its credentials.
 - Recipe module map, exclusions, KV-cache declaration, calibration method, and exporter.
 - Exact CLI arguments and whether dataset/sample/sequence values are honored by the entry point.
 
@@ -90,7 +90,7 @@ Independently reopen the exported files. In addition to the shared audit, requir
 
 Do not hard-code counts from a sibling model. Derive expected bases from current source keys and normalized recipe match rules, then compare actual transformed bases.
 
-For W4A16 NVFP4, validate group size, packed dimensions, U8 packed data, FP8 E4M3 block scales, FP32 secondary/input scales where the exporter emits them, and all scale values finite and positive. For W4A4 `NVFP4`, additionally require one finite, strictly positive F32 `input_scale` per quantized base; its absence means the export is W4A16 regardless of metadata labels.
+For W4A16 NVFP4, validate group size 16, packed dimensions, U8 packed data, FP8 E4M3 block scales, the FP32 secondary scale, and all scale values finite and positive. For W4A4 `NVFP4`, additionally require one finite, strictly positive F32 `input_scale` per quantized base; its absence means the export is W4A16 regardless of metadata labels. Conversely, an `input_scale` on a W4A16-labeled base means the recipe actually quantized activations — treat the base as `NVFP4` and re-derive the precision contract instead of forcing the label.
 
 For mixed-precision recipes, report separate W4A16, FP8, and unchanged counts and bytes. A runtime may resolve the checkpoint as `modelopt_mixed` even when the CLI loader flag is `modelopt_fp4`; record both values.
 

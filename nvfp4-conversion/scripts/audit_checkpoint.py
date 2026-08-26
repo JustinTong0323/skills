@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 import argparse
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from _common import checkpoint_layout, compare_tensor_content, load_json, scan_positive_finite, write_json
+
+NVFP4_GROUP_SIZE = 16
+PROTECTED_BASE = re.compile(r"(^|\.)(mtp|gate|router)(\.|$)")
 
 
 def quantized_layers(output: Path, contract: Path | None) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
@@ -41,13 +45,13 @@ def validate_shape(
     output_shape: list[int],
 ) -> None:
     if algorithm in ("NVFP4", "W4A16_NVFP4"):
-        if len(source_shape) != 2 or source_shape[1] % 2:
-            raise ValueError(f"NVFP4 source weight must be rank-2 with even input width: {base}")
-        if not isinstance(group_size, int) or group_size <= 0 or source_shape[1] % group_size:
+        if len(source_shape) < 2 or source_shape[-1] % 2:
+            raise ValueError(f"NVFP4 source weight must have an even innermost input width: {base}")
+        if group_size != NVFP4_GROUP_SIZE or source_shape[-1] % group_size:
             raise ValueError(f"invalid NVFP4 group_size for {base}: {group_size}")
         expected = {
-            "weight": [source_shape[0], source_shape[1] // 2],
-            "weight_scale": [source_shape[0], source_shape[1] // group_size],
+            "weight": source_shape[:-1] + [source_shape[-1] // 2],
+            "weight_scale": source_shape[:-1] + [source_shape[-1] // group_size],
             "weight_scale_2": [],
             "input_scale": [],
         }[form]
@@ -63,6 +67,7 @@ def main() -> None:
     parser.add_argument("--output-checkpoint", type=Path, required=True)
     parser.add_argument("--precision-contract", type=Path)
     parser.add_argument("--rows-per-chunk", type=int, default=1024)
+    parser.add_argument("--allow-quantized-protected", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.rows_per_chunk <= 0:
@@ -76,14 +81,27 @@ def main() -> None:
     config_quantization = output_config.get("quantization_config")
     if not isinstance(config_quantization, dict):
         raise ValueError("output config.json has no quantization_config object")
-    if config_quantization.get("quantized_layers") != layer_map:
+    config_layers = config_quantization.get("quantized_layers")
+    if config_layers is not None and config_layers != layer_map:
         raise ValueError("config.json and precision contract disagree on quantized_layers")
-    if config_quantization.get("quant_algo") != quantization.get("quant_algo"):
+    contract_algorithm = quantization.get("quant_algo")
+    if not isinstance(contract_algorithm, str) or not contract_algorithm:
+        raise ValueError("precision contract has no quant_algo")
+    config_algorithm = config_quantization.get("quant_algo")
+    if config_algorithm is not None and config_algorithm != contract_algorithm:
         raise ValueError("config.json and precision contract disagree on quant_algo")
     kv_cache_algorithm = quantization.get("kv_cache_quant_algo")
     kv_cache_scheme = config_quantization.get("kv_cache_scheme")
+    if (kv_cache_algorithm == "FP8") != (kv_cache_scheme is not None):
+        raise ValueError("config.json and precision contract disagree on the FP8 KV-cache declaration")
     if kv_cache_algorithm == "FP8" and kv_cache_scheme != {"dynamic": False, "num_bits": 8, "type": "float"}:
         raise ValueError("config.json kv_cache_scheme does not represent the FP8 precision contract")
+    protected = sorted(base for base in layer_map if PROTECTED_BASE.search(base))
+    if protected and not args.allow_quantized_protected:
+        raise ValueError(
+            "protected modules appear in quantized_layers; pass --allow-quantized-protected only with a "
+            f"dedicated recipe and independent qualification: {protected[:10]}"
+        )
     source_meta = source["tensor_metadata"]
     output_meta = output["tensor_metadata"]
     transformed_source_keys = set()
@@ -167,6 +185,8 @@ def main() -> None:
         "output_indexed_payload_bytes": output["indexed_payload_bytes"],
         "output_shard_count": len(output["physical_files"]),
         "output_tensor_count": len(output_meta),
+        "quantized_layers_recorded_in_config": config_layers is not None,
+        "quantized_protected_bases": protected,
         "scale_max": scale_maximum,
         "scale_min": scale_minimum,
         "scale_tensor_count": len(scale_keys),

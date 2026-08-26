@@ -18,7 +18,7 @@ For every tensor declared unchanged, compare a canonical logical content digest 
 
 Scan all recipe scale tensors with bounded CPU workers. Require finite, strictly positive values and record count/min/max.
 
-Run `scripts/audit_checkpoint.py` for unified-HF Model Optimizer output. It checks physical/index agreement, recipe metadata coverage, packed and scale forms, positive finite scales, and logical equality of unchanged tensors in bounded row chunks. A routed assembler must supply an equivalent `quantized_layers` precision contract when it does not emit `hf_quant_config.json`.
+Run `scripts/audit_checkpoint.py` for unified-HF Model Optimizer output. It checks physical/index agreement, recipe metadata coverage, packed and scale forms (dense rank-2 and fused rank-3 expert bases, NVFP4 group size 16), positive finite scales, and logical equality of unchanged tensors in bounded row chunks. Quantized MTP, router, or gate bases fail the audit unless `--allow-quantized-protected` is passed with a dedicated recipe and independent qualification. A routed assembler must supply an equivalent `quantized_layers` precision contract when it does not emit `hf_quant_config.json`.
 
 ## SGLang Runtime Gate
 
