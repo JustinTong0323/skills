@@ -56,6 +56,7 @@ def checkpoint_layout(root: Path) -> dict[str, Any]:
         path.relative_to(root).as_posix()
         for path in root.rglob("*")
         if path.is_file()
+        and ".cache/huggingface/" not in path.as_posix()
         and any(path.name.endswith(marker) or f"{marker}." in path.name for marker in incomplete_markers)
     )
     if incomplete_files:
@@ -176,7 +177,9 @@ def directory_inventory(root: Path) -> dict[str, Any]:
     if not root.is_dir():
         raise ValueError(f"inventory root does not exist: {root}")
     files = []
-    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+    for path in sorted(
+        item for item in root.rglob("*") if item.is_file() and ".cache/huggingface/" not in item.as_posix()
+    ):
         files.append(
             {
                 "name": path.relative_to(root).as_posix(),
