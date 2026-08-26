@@ -78,6 +78,14 @@ Treat KV-cache quantization separately from weight conversion. A recipe name end
 
 MTP policy must be explicit. If excluded, require source-identical content. If quantized, require a dedicated supported recipe and independent runtime qualification; never let MTP be quantized by an accidental wildcard.
 
+### Optional Adaptive Block Scaling (4/6)
+
+Adaptive block scaling ("Four Over Six", arXiv:2512.02010) quantizes each 16-value block twice — scaled to a maximum of 6 and of 4 — and keeps the version with lower per-block MSE, reducing error on the near-maximal values that dominate NVFP4 degradation. The exported format is unchanged (packed E2M1, E4M3 block scales, FP32 tensor scale, with the tensor scale derived from an E4M3 bound of 256 instead of 448), so runtime kernels and the tensor audit contract are unaffected; only scale selection changes.
+
+Use it only when the pinned, unmodified Model Optimizer or another hash-recorded, unmodified quantizer artifact implements it. A local ModelOpt patch or an ad-hoc requantization script violates the dependency boundary; such an implementation must first be qualified as a separate conversion artifact through the full gate chain. Declare the variant in the conversion manifest as part of recipe identity — output bytes change, so it is a new generation requiring full requalification.
+
+Published PTQ gains are perplexity and simple-task results on small dense models, and the method degraded GPTQ-based quantization in the same study. Do not combine it with second-order optimization recipes, and do not adopt it for a release without a controlled A/B against the standard recipe under the paired multi-seed protocol, thinking-length distribution, and agentic benchmark in [validation-and-release.md](validation-and-release.md). It complements, and does not replace, sensitive-layer exemption.
+
 ## Calibration Contract
 
 Freeze before conversion:
