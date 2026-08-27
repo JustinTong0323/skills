@@ -44,6 +44,30 @@ Harbor 0.20.0 can stop awaiting an agent without reliably killing every containe
 
 Changing or removing the deadline changes benchmark semantics. Preserve the bounded job and use a new job for an explicitly unbounded experiment.
 
+### Attribute a timeout by measurement, not by guess
+
+The deadline covers the whole agent phase: every turn, every tool call, and all model time. Measure what the wall clock actually contained rather than reasoning from the agent's reputation. From the trial's session JSONL, split the span by timestamp gaps into model time, tool-execution time, and agent overhead; count model calls and their mean latency; tally output tokens per turn; and record the stop reason on every turn.
+
+Read the result as:
+
+- stop reason never `max_tokens` means the output cap is not the constraint. The model is stopping naturally to call tools and simply reasoning at length per turn.
+- model time dominant means generation, not tooling. Combined with the per-stream throughput measurement from the contention preflight, this separates "the endpoint is slow" from "this harness generates far more tokens per task".
+- input tokens far above the other arm mean the harness replays a larger context per turn and pays more prefill.
+
+One measured campaign: across 8 timed-out trials, 9,222 s of wall span split into 7,619 s model time (82.6 percent), 1,578 s tool time, and 26 s overhead, over 1,164 model calls averaging 6.5 s. Stop reason was a tool call on every turn and never the output cap. Timed-out trials emitted roughly 132k output tokens each against about 15.7k for an average trial, with single turns peaking above 38k tokens. The first explanation offered, that the harness ran many slow tools, was wrong and the measurement refuted it.
+
+The decisive control is cross-arm: same endpoint, same concurrency, overlapping window, different harness. One arm producing 4 timeouts while another produced 15 rules out endpoint speed, because a slow endpoint penalizes both arms equally. In that campaign the slower arm also sent 3.4 times the input tokens for the same 89 tasks.
+
+Raising `agent_timeout_multiplier` is not a fix. It rescues the trials and destroys comparability with any published number. Lower concurrency or reduce reasoning effort instead, and report which you did.
+
+## The same tasks stop timing out when rerun alone
+
+A rerun of only the errored tasks fills fewer concurrent slots, so it runs at materially lighter load. When timeouts vanish under that lighter queue, contention in the parent run was the dominant cause and the parent score is a floor rather than a measurement.
+
+One campaign measured this directly: a c32 run produced 4 timeouts in one arm and 18 in the other; rerunning only those tasks eliminated 4 of 4 and 13 of 18. Per-stream throughput was 382 tokens per second idle against about 139 at c32.
+
+Do not respond by raising `agent_timeout_multiplier`, which changes benchmark semantics. Either accept the score as deadline-limited and label it, or rerun every task at lower concurrency for a comparable number. Report the lighter effective load of any subset rerun as a known confound rather than treating its outcomes as equivalent draws.
+
 ## Effectively unbounded agent phase never finishes
 
 `--agent-timeout-multiplier 1000000000` prevents Harbor from resolving agent-created subprocess waits. Examples include a foreground service piped to `tail`, an engine waiting on a protocol read, or a long search loop.
@@ -84,15 +108,32 @@ Inspect agent requests and server validation errors, probe every observed effort
 
 Harbor 0.20.0 appends the escaped instruction directly after Pi flags without `--`. A task instruction beginning with `- ` becomes an unknown option. Confirm the instruction and agent log; classify it as a stock-adapter harness failure.
 
+This failure is deterministic. Harbor rebuilds an identical command every run, so the task fails the same way on every attempt and the model never attempts it at all. One task reproduced it three times out of three, then passed on a patched adapter. See the file-argument remedy in [harnesses.md](harnesses.md).
+
 Task filters also require full package names:
 
 ```text
 terminal-bench/nginx-request-logging
 ```
 
-## Pi exits 137 after `pkill -f`
+## Pi exits 143 or 137 after a pattern kill
 
-The full task instruction is present in the long-lived Pi argv. If the agent runs `pkill -9 -f NAME` and `NAME` appears in the instruction, Pi matches and kills itself. Confirm process argv and absence of a host/kernel OOM event before classifying it.
+The full task instruction is present in the long-lived Pi argv. If the agent runs a pattern kill whose pattern appears in that instruction, Pi matches itself and dies:
+
+- a plain `pkill -f NAME` sends SIGTERM, so the trial reports **exit 143**;
+- `pkill -9 -f NAME` sends SIGKILL, so it reports exit 137.
+
+Exit 143 is the case observed in practice, three times in one campaign. Search agent logs for both codes, and for executed `pkill`, `pgrep`, and `killall` commands. Confirm the process argv and rule out a host or kernel OOM before classifying.
+
+The exposed set is every task whose instruction names a file, not the tasks whose instruction mentions a kill command. The agent invents the kill; the instruction only has to supply the filename, which ordinary cleanup then matches. In one campaign the kill interrupted a `pkill -f NAME; sleep 2; pgrep ...; rm -rf ...` cleanup sequence, which is why such trials can leave odd container state.
+
+The failure is stochastic and can change error class between attempts. One task went timeout, then self-kill, then timeout across three attempts, while another self-killed once and later passed. The harness tax is therefore a per-run lottery rather than a fixed set of tasks to subtract. Report a harness-adjusted score only for deterministic failures, and attach the attempt number to any adjustment.
+
+## Estimating harness tax before a run
+
+A scan of instruction text can find deterministic harness failures, such as instructions beginning with `- `. It cannot bound agent-triggered ones, because the agent's own commands are not in the instruction.
+
+Report such a scan as a lower bound on deterministic tax only, never as "the harness tax is N tasks". On one TB2.1 run the scan found no kill-command mentions and predicted a tax of exactly one task; the run then produced that one deterministic failure plus a stream of self-kills the scan could not see.
 
 ## High GPU utilization
 

@@ -99,9 +99,18 @@ The renderer writes a provider with `api: openai-completions`, the OpenAI `/v1` 
 Stock Harbor 0.20.0 passes the full task instruction as the Pi process's positional argv. Two consequences were confirmed on TB2.1:
 
 - an instruction beginning with `- ` is parsed as a Pi option because the adapter omits an option terminator;
-- `pkill -f <pattern>` can kill Pi itself when the pattern appears in the instruction stored in its argv.
+- a pattern kill such as `pkill -f <pattern>` can kill Pi itself when the pattern appears in the instruction stored in its argv.
 
-Do not patch the adapter inside a stock-harness score. Record those trials as harness errors and test any corrected adapter in a separate job.
+Both share one cause: the instruction is in argv. Pi's CLI accepts file arguments (`pi [options] [@files...] [messages...]`), so writing the instruction to a container-local file and passing `@/path` removes it from argv entirely and fixes both bugs at once. With no instruction token in argv there is nothing for a leading `- ` to be misparsed as, and nothing for a pattern kill to match. Confirmed by intervention on the deterministic case: a task that failed 3 of 3 stock attempts with an identical `NonZeroAgentExitCodeError` passed on the first patched attempt.
+
+Rules for using the remedy:
+
+- Never patch the adapter inside a scored run. Finish the stock job, then rerun the affected tasks as a separate, explicitly labelled job.
+- A patched-adapter result is not a stock-Pi number. Do not fold it into a stock union or place it beside a published Terminal-Bench figure. It answers one question: do these tasks become evaluable once the harness stops killing itself?
+- Ship the patch with a revert path and record which adapter each job ran.
+- Prove the failure mechanism is present in the control arm before believing a negative result. One argv-versus-file comparison was invalid because `procps` was absent from the container, so the pattern-kill binary did not exist and both arms survived. Both arms passing is the wrong shape for a real effect; treat it as a broken experiment rather than a fixed bug.
+
+Upgrading Harbor does not help. Harbor 0.20.0 and 0.21.0 build this command identically in `harbor/agents/installed/pi.py`, which passes the instruction through `shlex.quote` and interpolates it into the argv string, and the community `badlogic/pi-terminal-bench` adapter carries the same construction. The same self-termination bug class is reported open in other agent CLIs, where prompt-level mitigation alone has not held.
 
 ## Sampling and official comparisons
 

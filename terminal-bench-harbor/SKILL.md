@@ -1,7 +1,7 @@
 ---
 name: terminal-bench-harbor
-description: "Run Terminal-Bench 2.1 with Harbor against a local or remote SGLang/OpenAI/Anthropic-compatible endpoint. Use whenever the user mentions Terminal-Bench, TB2.1, Harbor evaluation, Terminus-2, Claude Code or Pi as a Harbor harness, pass@1/pass@k, or asks to benchmark an agentic model in Docker terminal tasks. Covers runner sizing, endpoint preflight, reproducible configs, smoke gates, detached execution, score-ceiling monitoring, completion audits, harness comparison, and failure attribution."
-version: 1.2.0
+description: "Run Terminal-Bench 2.1 with Harbor against a local or remote SGLang/OpenAI/Anthropic-compatible endpoint. Use whenever the user mentions Terminal-Bench, TB2.1, Harbor evaluation, Terminus-2, Claude Code or Pi as a Harbor harness, pass@1/pass@k, or asks to benchmark an agentic model in Docker terminal tasks. Covers runner sizing, endpoint preflight, contention preflight, reproducible configs, smoke gates, detached execution, score-ceiling monitoring, completion audits, harness comparison, error-only rerun unions, and failure attribution."
+version: 1.3.0
 ---
 
 # Terminal-Bench with Harbor
@@ -48,6 +48,8 @@ Re-resolve and record the digest when intentionally testing a newer dataset revi
 - Pin Harbor version, dataset digest, agent version, model ID, server revision and launch command, config hash, concurrency, attempts, timeout policy, retry policy, and runner type.
 - Use a new job name for every smoke, rerun, harness, or policy change. Never overwrite or reinterpret a contaminated job.
 - Change one comparison axis at a time. A harness comparison is not a sampling-only comparison when the harness does not expose the same controls.
+- Trial concurrency is a scoring axis, not only a throughput knob. Contention lengthens the agent phase against fixed task deadlines, so raising concurrency can lower the score with an identical model, harness, and dataset. Record concurrency and measured per-stream throughput next to every score, and never present two runs at different concurrency as a model or harness result.
+- The endpoint deployment is an identity field, not just the model name. Two slugs serving the same weights are different deployments with different speed. Record the resolved endpoint slug, URL, key identity, and smoke wall time for each run, and treat a deployment change as its own comparison axis.
 - Treat infrastructure, harness, API, agent, verifier, and model failures as different categories even when all receive reward zero.
 - Do not intervene in an active agent unless the user authorized recovery. Killing a process, injecting guidance, editing task files, or adding a timeout changes the run.
 - Do not publish a partial aggregate as a final score.
@@ -65,6 +67,8 @@ For SGLang, verify:
 curl -fsS "$OPENAI_BASE/models"
 curl -fsS -o /dev/null -w '%{http_code}\n' "$SERVER_ROOT/health"
 ```
+
+A 200 from `/models` or `/health` proves only that the control plane answers; neither performs generation. Add a generation probe and record tokens per second. Never cite health-probe latency as evidence that the endpoint is keeping up: a 0.2 s `/models` response is compatible with a run in which a quarter of all tasks exhaust their deadlines.
 
 Probe the actual reasoning and tool-call contract with a small request before Harbor. For Anthropic-compatible endpoints, exercise every effort value the selected agent version may emit, not only the configured headline value. Keep the model-specific reasoning parser, tool parser, context length, quantization, parallelism, and speculative algorithm unchanged during a harness A/B. Record the runtime image digest and the code revision reported inside the running server; a local checkout SHA does not prove what the endpoint is serving. After any runtime patch or restart, repeat the live probes and smoke against the new process.
 
@@ -193,9 +197,33 @@ The smoke must prove all of these:
 - artifact collection and verifier execution;
 - reward 1 with no agent, API, environment, or verifier exception.
 
+Record the smoke's wall-clock time as a named baseline, and compare it against the same task's smoke on any deployment whose score you intend to compare. A regression beyond roughly 2x on an identical task predicts timeout-class failures across the suite and means the two runs are not a model comparison. An observed 56 s to 3 m 11 s smoke regression on the same task and harness preceded a rise from 4 timeouts in 89 trials to 25 in 89 at half the concurrency.
+
 A direct API probe alone does not authorize the 89-task run. Inspect the smoke trajectory for the actual agent version, effective context/output limits, and emitted reasoning values; configured environment variables are not proof that the agent honored them.
 
 For concurrency above the previously validated level, add a capacity gate before the full run. Send concurrent protocol-level requests covering the configured effort and related values the agent version may emit, then verify every response and stop reason. Use a separate Harbor job to exercise image setup, Docker networks, the endpoint route, and the model queue together; require it to finish cleanly before creating the full-run job.
+
+### Contention preflight
+
+Required whenever the endpoint is shared or untested at the intended concurrency. Concurrency does not only decide how fast the suite runs; it decides how many tasks finish inside their deadlines, and therefore the score.
+
+Measure per-stream generation throughput both idle and at the intended concurrency, using the same prompt and output length in each regime, and compute `output_tokens / elapsed` per stream:
+
+```bash
+curl -fsS "$OPENAI_BASE/chat/completions" \
+  -H 'content-type: application/json' \
+  -d '{"model":"'"$MODEL"'","messages":[{"role":"user","content":"PROMPT"}],"max_tokens":800}' \
+  -w '\n%{time_total}\n'
+
+seq "$CONC" | xargs -P "$CONC" -I{} curl -fsS "$OPENAI_BASE/chat/completions" \
+  -H 'content-type: application/json' \
+  -d '{"model":"'"$MODEL"'","messages":[{"role":"user","content":"PROMPT"}],"max_tokens":800}' \
+  -o /tmp/burst-{}.json -w '%{time_total}\n'
+```
+
+A ratio worse than roughly 2x means the configured concurrency will convert task deadlines into failures and the resulting score is a floor, not a measurement. Either lower concurrency or state in the report that the score is deadline-limited at this load. One measured case: 382 tokens per second on a single stream against about 139 per stream at c32, a 2.7x penalty that later accounted for most of the timeout-class failures in both harness arms.
+
+A burst error rate is the wrong gate. A synthetic c32 burst against one endpoint returned about 30 percent `503` queue-full responses and tripped a per-key rate limit, while the real Harbor run at that same concurrency completed with zero retries, because each trial issues one sequential request with agent think time between turns rather than a synchronized burst. Gate on sustained per-stream token rate, and do not re-tune concurrency from a burst probe. Aggressive probing can itself trip per-key limits and contaminate a concurrent run.
 
 ## Phase 4: start the full run detached
 
@@ -286,6 +314,8 @@ python3 "$TB_HARBOR_SKILL_DIR/scripts/summarize_job.py" /home/ubuntu/tb21/jobs/R
 sha256sum /home/ubuntu/tb21/jobs/RUN/result.json /home/ubuntu/tb21/jobs/RUN/config.json
 ```
 
+A watchdog notification, a background-task completion event, or a `wait` that returns is not a completion signal either. Before auditing, re-read the direct signals: a non-null `finished_at`, the recorded driver exit status file, and the absence of the driver PID. Only those count. An audit begun on an indirect signal has to be retracted when the direct ones disagree.
+
 Trial-local JSON can be invalid after Harbor redaction inserts a literal `[REDACTED]`. Prefer the valid aggregate and inspect `exception.txt`, agent logs, session JSONL, and verifier artifacts for that trial.
 
 An intentionally stopped job is not complete even if its finalized stats say every slot is completed. Audit it with the last pre-stop snapshot and reward records:
@@ -311,6 +341,9 @@ Report:
 
 - passed tasks / 89 and mean reward;
 - exact dataset digest and attempts;
+- endpoint deployment slug and the smoke wall-time baseline;
+- trial concurrency, and per-stream throughput both idle and at that concurrency;
+- whether the score is deadline-limited. Any `AgentTimeoutError` present means the reported score is a floor, and the report must say so;
 - wall time, tokens, and reported cost separately;
 - error and retry counts by category;
 - paired both-pass, both-fail, left-only, and right-only tasks;
@@ -340,6 +373,24 @@ Distinguish:
 
 Validate Harbor's pass-at-k output independently with `summarize_job.py`. It groups trial IDs by the task prefix before the final `__<trial-suffix>`. A partial or cancelled 1,424-trial job has no final pass@16, even if some tasks already succeeded.
 
+## Phase 8b: error-only reruns and union scores
+
+Rerunning only the errored or failed tasks in a new job is legitimate, and its union with the base run is sound arithmetic. A task that already passed cannot un-pass, so the union equals what a full rerun would have produced; retrying only failures is not cherry-picking for a union metric. Two constraints hold anyway:
+
+1. It is not pass@1. Never place a union beside a published pass@1 number, which compares two attempts to one.
+2. The second attempt is not an independent draw. A subset rerun fills fewer slots and therefore runs at lighter load, which advantages exactly the deadline-limited tasks that failed. Report the effective-load difference as a known confound rather than as an equivalent draw.
+
+Report base pass@1 and the union side by side, labelled, with the attempt count, and state which is comparable to published results. Only pass@1 is. One campaign moved from 62/89 to 75/89 over three attempts, a swing that was mostly deadline relief rather than new capability.
+
+Keep `n_concurrent_trials` and every other field identical so `compare_configs.py` shows only `job_name` and the task list as changed.
+
+Before launching the rerun, split the errored tasks and record a prediction:
+
+- deterministic harness failures, where Harbor rebuilds an identical broken command, will reproduce exactly. Include them for confirmation rather than as a second chance, and label them, or a reader scores them as the model failing a retry.
+- stochastic failures, such as timeouts and self-kills, may flip in either direction, including between error classes.
+
+Recording the prediction before the run is what makes the outcome evidence rather than narrative.
+
 ## Troubleshooting routing
 
-Read [troubleshooting.md](references/troubleshooting.md) for Docker network exhaustion, cold image failures, endpoint-route loss, setup download resets, timeout process leaks, content-block compatibility, effort mapping, Pi argv bugs, self-termination, unbounded subprocess waits, lease expiry, runtime-image drift, partial and cancelled jobs, score cutoffs, artifact retention, and suspicious reference-score gaps.
+Read [troubleshooting.md](references/troubleshooting.md) for Docker network exhaustion, cold image failures, endpoint-route loss, setup download resets, contention-driven timeouts, timeout attribution by measurement, timeout process leaks, content-block compatibility, effort mapping, Pi argv bugs, self-termination, harness-tax estimation, unbounded subprocess waits, lease expiry, runtime-image drift, partial and cancelled jobs, score cutoffs, artifact retention, and suspicious reference-score gaps.
