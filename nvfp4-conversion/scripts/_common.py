@@ -178,7 +178,11 @@ def directory_inventory(root: Path) -> dict[str, Any]:
         raise ValueError(f"inventory root does not exist: {root}")
     files = []
     for path in sorted(
-        item for item in root.rglob("*") if item.is_file() and ".cache/huggingface/" not in item.as_posix()
+        item
+        for item in root.rglob("*")
+        if item.is_file()
+        and ".cache/huggingface/" not in item.as_posix()
+        and "/.git/" not in item.as_posix()
     ):
         files.append(
             {
