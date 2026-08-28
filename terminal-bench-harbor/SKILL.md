@@ -1,7 +1,7 @@
 ---
 name: terminal-bench-harbor
-description: "Run Terminal-Bench 2.1 with Harbor against a local or remote SGLang/OpenAI/Anthropic-compatible endpoint. Use whenever the user mentions Terminal-Bench, TB2.1, Harbor evaluation, Terminus-2, Claude Code or Pi as a Harbor harness, pass@1/pass@k, or asks to benchmark an agentic model in Docker terminal tasks. Covers runner sizing, endpoint preflight, contention preflight, reproducible configs, smoke gates, detached execution, score-ceiling monitoring, completion audits, harness comparison, error-only rerun unions, and failure attribution."
-version: 1.3.0
+description: "Run Terminal-Bench 2.1 with Harbor against a local or remote SGLang/OpenAI/Anthropic-compatible endpoint. Use whenever the user mentions Terminal-Bench, TB2.1, Harbor evaluation, Terminus-2, Claude Code or Pi as a Harbor harness, Avg@k, pass@1/pass@k, or asks to benchmark an agentic model in Docker terminal tasks. Covers capability-first timeout policy, runner sizing, endpoint preflight, contention preflight, reproducible configs, smoke gates, detached execution, score-ceiling monitoring, completion audits, harness comparison, error-only rerun unions, and failure attribution."
+version: 1.4.0
 ---
 
 # Terminal-Bench with Harbor
@@ -30,7 +30,7 @@ Gather or discover these before writing a config:
 4. Agent harness: `terminus-2`, `claude-code`, or `pi`.
 5. Reasoning mode and sampling settings supported by that harness.
 6. Trial concurrency, attempts per task, and runner TTL.
-7. Agent-timeout and retry policy. These change evaluation semantics and must never be silently changed.
+7. Agent-timeout and retry policy. Default to the capability-first policy unless the objective is strict task-deadline comparability.
 8. Dataset ref. Pin the resolved digest instead of relying on `latest` for a scored run.
 9. Baseline or target score, and whether an optimistic score ceiling may stop the run.
 10. Durable artifact destination and which dedicated CPU/GPU resources should be released afterward.
@@ -46,9 +46,10 @@ Re-resolve and record the digest when intentionally testing a newer dataset revi
 ## Evaluation invariants
 
 - Pin Harbor version, dataset digest, agent version, model ID, server revision and launch command, config hash, concurrency, attempts, timeout policy, retry policy, and runner type.
+- Separate capability from deadline performance. The default capability-first policy makes the agent phase effectively unbounded so every task reaches natural grading. A task-defined timeout run is a different evaluation and its `AgentTimeoutError` outcomes are deadline failures, not direct model-capability evidence.
 - Use a new job name for every smoke, rerun, harness, or policy change. Never overwrite or reinterpret a contaminated job.
 - Change one comparison axis at a time. A harness comparison is not a sampling-only comparison when the harness does not expose the same controls.
-- Trial concurrency is a scoring axis, not only a throughput knob. Contention lengthens the agent phase against fixed task deadlines, so raising concurrency can lower the score with an identical model, harness, and dataset. Record concurrency and measured per-stream throughput next to every score, and never present two runs at different concurrency as a model or harness result.
+- Trial concurrency is always a run-identity field. Under task-defined deadlines it is also a scoring axis, because contention can turn slower completion into timeout zeros. Under the capability policy it controls wall time and infrastructure pressure instead. Record concurrency and measured per-stream throughput next to every score, and never present two runs at different concurrency as a pure model or harness result.
 - The endpoint deployment is an identity field, not just the model name. Two slugs serving the same weights are different deployments with different speed. Record the resolved endpoint slug, URL, key identity, and smoke wall time for each run, and treat a deployment change as its own comparison axis.
 - Treat infrastructure, harness, API, agent, verifier, and model failures as different categories even when all receive reward zero.
 - Do not intervene in an active agent unless the user authorized recovery. Killing a process, injecting guidance, editing task files, or adding a timeout changes the run.
@@ -97,7 +98,10 @@ df -h / /var/lib/docker
 df -ih / /var/lib/docker
 docker system df
 docker ps
+test -c /dev/kvm && test -r /dev/kvm && test -w /dev/kvm
 ```
+
+The last check gates the two QEMU tasks. On non-metal EC2 runners without `/dev/kvm`, `qemu-alpine-ssh` and `qemu-startup` repeatedly failed before natural grading with the same runtime error. Use a KVM-capable metal runner for a complete model score, or report those slots as deterministic runner failures.
 
 Install a pinned Harbor version with `uv` when absent:
 
@@ -150,12 +154,17 @@ python3 "$TB_HARBOR_SKILL_DIR/scripts/compare_configs.py" \
 
 The comparison ignores only top-level `job_name` by default, exits 0 when the remaining structure is identical, and exits 1 with the differing JSON paths otherwise. Use `--ignore-key` only for another explicitly approved identity-only field.
 
-Timeout policy must be explicit:
+Harbor 0.20.0 writes `config.json` with default-valued fields omitted. The bundled tools resolve the documented defaults `n_attempts=1` and `n_concurrent_trials=4` before summarizing or comparing configs. They still require `config.json`; a missing artifact is not permission to infer run semantics.
 
-- Omit `--agent-timeout-multiplier` to retain task-defined benchmark deadlines.
-- Use a finite, auditable multiplier such as `1000000000` only when the user explicitly requests an effectively unbounded agent phase.
+Timeout policy must be explicit in the report:
+
+- The renderer defaults to `--agent-timeout-policy capability`, which writes the finite, auditable multiplier `1000000000`. This is effectively unbounded and lets tasks reach natural grading instead of turning upstream latency into model zeros.
+- Use `--agent-timeout-policy task-defined` only when strict comparison to the task-defined deadline protocol is the objective. This omits the multiplier.
+- Use `--agent-timeout-multiplier N` with the capability policy only for an explicitly chosen finite replacement.
 - Do not use `inf` with Harbor 0.20.0. It is accepted at runtime but serialized as `null`, losing replay semantics.
 - Setup and verifier timeouts remain separate. `--agent-setup-timeout-multiplier 3` is useful for CLI installation and network variance.
+
+An effectively unbounded agent phase can leave a runaway reasoning turn or child-process wait occupying a slot indefinitely. Monitor progress without intervention, classify the wait, and require explicit recovery authority before stopping it. Never finalize a score around a still-running long tail.
 
 Restrict retries to infrastructure exceptions unless the evaluation protocol says otherwise:
 
@@ -197,7 +206,7 @@ The smoke must prove all of these:
 - artifact collection and verifier execution;
 - reward 1 with no agent, API, environment, or verifier exception.
 
-Record the smoke's wall-clock time as a named baseline, and compare it against the same task's smoke on any deployment whose score you intend to compare. A regression beyond roughly 2x on an identical task predicts timeout-class failures across the suite and means the two runs are not a model comparison. An observed 56 s to 3 m 11 s smoke regression on the same task and harness preceded a rise from 4 timeouts in 89 trials to 25 in 89 at half the concurrency.
+Record the smoke's wall-clock time as a named baseline, and compare it against the same task's smoke on any deployment whose score you intend to compare. A regression beyond roughly 2x on an identical task means the two deployments do not have matched performance. Under task-defined deadlines it predicts timeout-class score loss; under the capability policy it predicts a much longer campaign and higher exposure to infrastructure failure. An observed 56 s to 3 m 11 s smoke regression on the same task and harness preceded a rise from 4 timeouts in 89 trials to 25 in 89 at half the concurrency.
 
 A direct API probe alone does not authorize the 89-task run. Inspect the smoke trajectory for the actual agent version, effective context/output limits, and emitted reasoning values; configured environment variables are not proof that the agent honored them.
 
@@ -205,7 +214,7 @@ For concurrency above the previously validated level, add a capacity gate before
 
 ### Contention preflight
 
-Required whenever the endpoint is shared or untested at the intended concurrency. Concurrency does not only decide how fast the suite runs; it decides how many tasks finish inside their deadlines, and therefore the score.
+Required whenever the endpoint is shared or untested at the intended concurrency. For a capability run, use it to avoid overload and estimate the long tail. For a task-defined run, it also predicts how many tasks will finish inside their deadlines.
 
 Measure per-stream generation throughput both idle and at the intended concurrency, using the same prompt and output length in each regime, and compute `output_tokens / elapsed` per stream:
 
@@ -221,7 +230,7 @@ seq "$CONC" | xargs -P "$CONC" -I{} curl -fsS "$OPENAI_BASE/chat/completions" \
   -o /tmp/burst-{}.json -w '%{time_total}\n'
 ```
 
-A ratio worse than roughly 2x means the configured concurrency will convert task deadlines into failures and the resulting score is a floor, not a measurement. Either lower concurrency or state in the report that the score is deadline-limited at this load. One measured case: 382 tokens per second on a single stream against about 139 per stream at c32, a 2.7x penalty that later accounted for most of the timeout-class failures in both harness arms.
+A ratio worse than roughly 2x means the configured concurrency is too high for a clean performance comparison. Lower it for a capability run unless the longer wall time and infrastructure exposure are acceptable. For a task-defined run, the resulting score is deadline-limited and must be reported as a floor. One measured case: 382 tokens per second on a single stream against about 139 per stream at c32, a 2.7x penalty that later accounted for most of the timeout-class failures in both harness arms.
 
 A burst error rate is the wrong gate. A synthetic c32 burst against one endpoint returned about 30 percent `503` queue-full responses and tripped a per-key rate limit, while the real Harbor run at that same concurrency completed with zero retries, because each trial issues one sequential request with agent think time between turns rather than a synchronized burst. Gate on sustained per-stream token rate, and do not re-tune concurrency from a burst probe. Aggressive probing can itself trip per-key limits and contaminate a concurrent run.
 
@@ -314,6 +323,8 @@ python3 "$TB_HARBOR_SKILL_DIR/scripts/summarize_job.py" /home/ubuntu/tb21/jobs/R
 sha256sum /home/ubuntu/tb21/jobs/RUN/result.json /home/ubuntu/tb21/jobs/RUN/config.json
 ```
 
+For a complete balanced k-attempt job, the summary reports both Avg@k and Pass@k. Avg@k is the mean reward across all task-attempt slots; Pass@k is the fraction of tasks with at least one pass. Errors remain zero-valued slots in the strict result.
+
 A watchdog notification, a background-task completion event, or a `wait` that returns is not a completion signal either. Before auditing, re-read the direct signals: a non-null `finished_at`, the recorded driver exit status file, and the absence of the driver PID. Only those count. An audit begun on an indirect signal has to be retracted when the direct ones disagree.
 
 Trial-local JSON can be invalid after Harbor redaction inserts a literal `[REDACTED]`. Prefer the valid aggregate and inspect `exception.txt`, agent logs, session JSONL, and verifier artifacts for that trial.
@@ -340,10 +351,11 @@ python3 "$TB_HARBOR_SKILL_DIR/scripts/compare_jobs.py" \
 Report:
 
 - passed tasks / 89 and mean reward;
+- Avg@k and Pass@k with their distinct definitions;
 - exact dataset digest and attempts;
 - endpoint deployment slug and the smoke wall-time baseline;
 - trial concurrency, and per-stream throughput both idle and at that concurrency;
-- whether the score is deadline-limited. Any `AgentTimeoutError` present means the reported score is a floor, and the report must say so;
+- whether the score is capability-first or task-defined. Any `AgentTimeoutError` means the run did not produce a complete capability score and the report must say so;
 - wall time, tokens, and reported cost separately;
 - error and retry counts by category;
 - paired both-pass, both-fail, left-only, and right-only tasks;
@@ -354,7 +366,7 @@ An official-score gap is not a model regression until harness and protocol diffe
 
 For stochastic pass@1 reruns, compare outcomes only on tasks that reached natural grading in both jobs. Report both directions of task flips and the net change. A headline score difference without paired task churn can hide large run-to-run variance.
 
-## Phase 8: pass@k
+## Phase 8: Avg@k and Pass@k
 
 Harbor uses `n_attempts`; TB2.1 pass@16 is 89 × 16 = 1,424 trials. Keep trial concurrency fixed unless intentionally testing capacity, and extend both CPU runner and GPU server leases before launch.
 
@@ -369,13 +381,18 @@ python3 "$TB_HARBOR_SKILL_DIR/scripts/render_config.py" \
 Distinguish:
 
 - per-trial mean reward: average pass@1 across all sampled attempts;
+- Avg@k: mean reward across k attempts per task; for a complete balanced job this equals the per-trial mean;
 - pass@16 union: fraction of tasks with at least one success among 16 attempts.
 
-Validate Harbor's pass-at-k output independently with `summarize_job.py`. It groups trial IDs by the task prefix before the final `__<trial-suffix>`. A partial or cancelled 1,424-trial job has no final pass@16, even if some tasks already succeeded.
+Validate Harbor's Avg@k and pass-at-k output independently with `summarize_job.py`. It groups trial IDs by the task prefix before the final `__<trial-suffix>`. A partial or cancelled 1,424-trial job has neither a final Avg@16 nor a final Pass@16, even if some tasks already succeeded.
+
+Do not automatically merge Avg@k across a base job and top-up jobs. A valid effective ledger must record the original task-attempt slot, the exclusion reason, the replacement job and trial, the frozen config axes, and a predeclared first-k selection order. Wrong-endpoint attempts, timeout replacements, and later retries cannot be distinguished safely from aggregate files alone. Keep the strict base score and label any lineage-backed replacement score as adjusted.
 
 ## Phase 8b: error-only reruns and union scores
 
-Rerunning only the errored or failed tasks in a new job is legitimate, and its union with the base run is sound arithmetic. A task that already passed cannot un-pass, so the union equals what a full rerun would have produced; retrying only failures is not cherry-picking for a union metric. Two constraints hold anyway:
+The default capability-first policy should not produce `AgentTimeoutError`. If one appears, first verify that the resolved `config.json` contains `agent_timeout_multiplier: 1000000000.0`; a missing multiplier means the wrong policy ran.
+
+For a task-defined deadline run, rerunning only the errored or failed tasks in a new job is legitimate, and its union with the base run is sound arithmetic. A task that already passed cannot un-pass, so the union equals what a full rerun would have produced; retrying only failures is not cherry-picking for a union metric. Two constraints hold anyway:
 
 1. It is not pass@1. Never place a union beside a published pass@1 number, which compares two attempts to one.
 2. The second attempt is not an independent draw. A subset rerun fills fewer slots and therefore runs at lighter load, which advantages exactly the deadline-limited tasks that failed. Report the effective-load difference as a known confound rather than as an equivalent draw.

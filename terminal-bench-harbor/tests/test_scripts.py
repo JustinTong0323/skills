@@ -87,13 +87,23 @@ class HarborResultsTests(unittest.TestCase):
             )
             value = summarize(job)
         self.assertTrue(value["complete"])
+        self.assertEqual(value["evals"][0]["avg_at_attempts"], 0.25)
         self.assertEqual(value["evals"][0]["pass_at_attempts"], 0.5)
 
-    def test_summary_rejects_missing_attempt_metadata(self) -> None:
+    def test_summary_uses_harbor_omitted_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             job = Path(directory)
             (job / "result.json").write_text(json.dumps(self.result()))
-            with self.assertRaisesRegex(ValueError, "positive integer n_attempts"):
+            (job / "config.json").write_text(json.dumps({"job_name": "test"}))
+            value = summarize(job)
+        self.assertEqual(value["n_attempts"], 1)
+        self.assertEqual(value["n_concurrent_trials"], 4)
+
+    def test_summary_rejects_missing_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job = Path(directory)
+            (job / "result.json").write_text(json.dumps(self.result()))
+            with self.assertRaisesRegex(ValueError, "config.json is required"):
                 summarize(job)
 
     def test_incomplete_summary_is_not_final(self) -> None:
@@ -194,6 +204,17 @@ class HarborResultsTests(unittest.TestCase):
         left = normalized_config(left)
         right = normalized_config(right)
         self.assertEqual(config_differences(left, right), ["$.agents[0].kwargs.top_p"])
+
+    def test_config_comparison_resolves_harbor_omitted_defaults(self) -> None:
+        left = normalized_config({"job_name": "left"})
+        right = normalized_config(
+            {
+                "job_name": "right",
+                "n_attempts": 1,
+                "n_concurrent_trials": 4,
+            }
+        )
+        self.assertEqual(config_differences(left, right), [])
 
     def test_target_cli_uses_distinct_unreachable_exit(self) -> None:
         result = self.result(finished=False)
@@ -307,6 +328,31 @@ class RenderConfigTests(unittest.TestCase):
         )
         self.assertEqual(job["agents"][0]["model_name"], "openai/org/model")
         self.assertEqual(job["agents"][0]["env"]["OPENAI_API_KEY"], "EMPTY")
+        self.assertEqual(job["agent_timeout_multiplier"], 1_000_000_000.0)
+
+    def test_task_defined_timeout_policy_omits_multiplier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            command = self.renderer_command("terminus-2", Path(directory))
+            command.extend(("--agent-timeout-policy", "task-defined"))
+            subprocess.run(command, check=True)
+            job = json.loads((Path(directory) / "job.json").read_text())
+        self.assertNotIn("agent_timeout_multiplier", job)
+
+    def test_task_defined_timeout_policy_rejects_multiplier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            command = self.renderer_command("terminus-2", Path(directory))
+            process = subprocess.run(
+                [
+                    *command,
+                    "--agent-timeout-policy",
+                    "task-defined",
+                    "--agent-timeout-multiplier",
+                    "2",
+                ],
+                capture_output=True,
+                text=True,
+            )
+        self.assertNotEqual(process.returncode, 0)
 
     def test_rejects_invalid_sampling_values(self) -> None:
         cases = (

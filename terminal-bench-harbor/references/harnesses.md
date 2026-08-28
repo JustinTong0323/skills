@@ -46,6 +46,8 @@ Use the OpenAI `/v1` base. The renderer produces the equivalent of:
 
 Replace model limits with the served model's actual values. Terminus-2 is the closest of these stock Harbor agents to a controlled temperature/top-p experiment. The renderer requires a finite non-negative temperature and `0 < top_p <= 1`.
 
+Terminus-2 performs model requests in the Harbor launcher process through LiteLLM. The agent config `env` reaches container-side execs but does not supply credentials to that host-side client. For an authenticated endpoint, load `OPENAI_API_KEY` into the launcher environment from an owner-only file before `harbor run`; do not rely on `agents[].env.OPENAI_API_KEY` or put the key literal in shell history. One complete campaign's first smoke failed before any model request until the launcher environment was corrected.
+
 ## Claude Code
 
 Use the Anthropic server root, not the OpenAI `/v1` base:

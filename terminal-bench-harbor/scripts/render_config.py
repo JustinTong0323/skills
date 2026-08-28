@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Any
 
 
+CAPABILITY_TIMEOUT_MULTIPLIER = 1_000_000_000.0
+
+
 def api_bases(value: str) -> tuple[str, str]:
     base = value.rstrip("/")
     root = base[:-3] if base.endswith("/v1") else base
@@ -144,8 +147,10 @@ def build_job(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any] 
         "datasets": [dataset],
     }
     models = None
-    if args.agent_timeout_multiplier is not None:
-        job["agent_timeout_multiplier"] = args.agent_timeout_multiplier
+    if args.agent_timeout_policy == "capability":
+        job["agent_timeout_multiplier"] = (
+            args.agent_timeout_multiplier or CAPABILITY_TIMEOUT_MULTIPLIER
+        )
     if args.agent == "pi":
         if args.pi_models_path is None:
             raise ValueError("--pi-models-path is required for the Pi harness")
@@ -228,6 +233,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--concurrency", type=positive_int, default=16)
     parser.add_argument("--attempts", type=positive_int, default=1)
+    parser.add_argument(
+        "--agent-timeout-policy",
+        choices=("capability", "task-defined"),
+        default="capability",
+    )
     parser.add_argument("--agent-timeout-multiplier", type=finite_positive_float)
     parser.add_argument(
         "--agent-setup-timeout-multiplier", type=finite_positive_float, default=3.0
@@ -246,6 +256,13 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.max_retries < 0:
         parser.error("--max-retries must be non-negative")
+    if (
+        args.agent_timeout_policy == "task-defined"
+        and args.agent_timeout_multiplier is not None
+    ):
+        parser.error(
+            "--agent-timeout-multiplier requires --agent-timeout-policy capability"
+        )
     if args.task and any(not task.startswith("terminal-bench/") for task in args.task):
         parser.error("--task values must use full terminal-bench/<task> names")
     return args

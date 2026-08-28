@@ -34,6 +34,9 @@ def print_human(summary: dict) -> None:
             f"{eval_summary['expected_trials']}; "
             f"ungraded: {eval_summary['ungraded_trials']}"
         )
+        avg_at_attempts = eval_summary["avg_at_attempts"]
+        if avg_at_attempts is not None:
+            print(f"Avg@{summary['n_attempts']}: {100 * avg_at_attempts:.2f}%")
         pass_at_attempts = eval_summary["pass_at_attempts"]
         if pass_at_attempts is not None:
             print(

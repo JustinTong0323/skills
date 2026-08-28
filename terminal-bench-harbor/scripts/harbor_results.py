@@ -5,6 +5,9 @@ from pathlib import Path
 from typing import Any
 
 
+HARBOR_JOB_DEFAULTS = {"n_attempts": 1, "n_concurrent_trials": 4}
+
+
 def load_job(path: str | Path) -> tuple[dict[str, Any], dict[str, Any], Path]:
     candidate = Path(path)
     result_path = candidate / "result.json" if candidate.is_dir() else candidate
@@ -86,7 +89,8 @@ def normalized_config(
     config: dict[str, Any], ignored_keys: set[str] | None = None
 ) -> dict[str, Any]:
     ignored = {"job_name"} if ignored_keys is None else ignored_keys
-    return {key: value for key, value in config.items() if key not in ignored}
+    resolved = {**HARBOR_JOB_DEFAULTS, **config}
+    return {key: value for key, value in resolved.items() if key not in ignored}
 
 
 def config_differences(left: Any, right: Any, path: str = "$") -> list[str]:
@@ -152,6 +156,11 @@ def summarize_eval(
         else None
     )
     expected_trials = expected_tasks * attempts if expected_tasks is not None else None
+    avg_at_attempts = (
+        sum(reward for _, reward in pairs) / expected_trials
+        if complete and expected_trials
+        else None
+    )
     ungraded_trials = (
         max(expected_trials - len(pairs), 0) if expected_trials is not None else None
     )
@@ -179,6 +188,7 @@ def summarize_eval(
         "expected_tasks": expected_tasks,
         "exhausted_failed_tasks": exhausted_failures,
         "optimistic_successful_tasks": optimistic_successful_tasks,
+        "avg_at_attempts": avg_at_attempts,
         "pass_at_attempts": lower_bound if complete else None,
         "partial_pass_at_attempts_lower_bound": None if complete else lower_bound,
         "partial_pass_at_attempts_upper_bound": None if complete else upper_bound,
@@ -194,12 +204,25 @@ def summarize(path: str | Path, target_passes: int | None = None) -> dict[str, A
     if target_passes is not None and target_passes < 0:
         raise ValueError("target_passes must be non-negative")
     result, config, result_path = load_job(path)
+    if not (result_path.parent / "config.json").exists():
+        raise ValueError("config.json is required to recover job semantics")
     stats = result.get("stats", {})
     evals = stats.get("evals", {})
     complete = is_complete(result)
-    attempts = config.get("n_attempts")
+    attempts = config.get("n_attempts", HARBOR_JOB_DEFAULTS["n_attempts"])
     if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts <= 0:
         raise ValueError("config.json must contain a positive integer n_attempts")
+    concurrency = config.get(
+        "n_concurrent_trials", HARBOR_JOB_DEFAULTS["n_concurrent_trials"]
+    )
+    if (
+        not isinstance(concurrency, int)
+        or isinstance(concurrency, bool)
+        or concurrency <= 0
+    ):
+        raise ValueError(
+            "config.json must contain a positive integer n_concurrent_trials"
+        )
     expected_tasks = expected_task_count(result, attempts, len(evals))
     return {
         "path": str(result_path),
@@ -209,7 +232,7 @@ def summarize(path: str | Path, target_passes: int | None = None) -> dict[str, A
         "finished_at": result.get("finished_at"),
         "complete": complete,
         "n_attempts": attempts,
-        "n_concurrent_trials": config.get("n_concurrent_trials"),
+        "n_concurrent_trials": concurrency,
         "n_total_trials": result.get("n_total_trials"),
         "n_completed_trials": stats.get("n_completed_trials"),
         "n_running_trials": stats.get("n_running_trials"),

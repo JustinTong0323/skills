@@ -36,9 +36,19 @@ Do not hardcode a Docker gateway address from another machine. Resolve a routabl
 
 Claude Code and Pi may install their CLI during agent setup. `curl: (56) Recv failure: Connection reset by peer` before model execution is an infrastructure failure. Use `agent_setup_timeout_multiplier=3`, retain the failed smoke, and rerun under a new job name. Do not count the first failure as model evidence.
 
+## Terminus-2 reports missing credentials before the first model request
+
+Terminus-2's LiteLLM calls run in the Harbor launcher process. Values under the agent config's `env` are scoped to container execution and do not authenticate that host-side client. Source an owner-only launcher environment containing `OPENAI_API_KEY`, verify the key identity without printing its value, and start a new smoke. Treat the failed smoke as configuration evidence, not model evidence.
+
+## QEMU tasks fail before natural grading
+
+`qemu-alpine-ssh` and `qemu-startup` require hardware virtualization. On non-metal EC2 runners without a usable `/dev/kvm`, both tasks repeatedly produced the same runtime failure across independent campaigns. Check the device before launch and use a KVM-capable metal runner. Do not fold deterministic runner-ineligible zeros into a model-capability score.
+
 ## `AgentTimeoutError`
 
 This is Harbor's outer deadline for the agent phase, derived from the task timeout and multiplier. It does not mean SGLang timed out.
+
+The renderer's capability policy writes `agent_timeout_multiplier=1000000000`, so a new capability-first job should not reach this exception in practice. Confirm the resolved config before rerunning. Task-defined deadline jobs may produce it legitimately, but the result measures time-to-solution under that deadline rather than capability alone.
 
 Harbor 0.20.0 can stop awaiting an agent without reliably killing every container-side child. A surviving agent or training process can race the verifier and invalidate the trial. Before interpreting the reward, inspect the task process tree, agent timestamps, verifier timestamps, and container lifecycle.
 
@@ -58,7 +68,7 @@ One measured campaign: across 8 timed-out trials, 9,222 s of wall span split int
 
 The decisive control is cross-arm: same endpoint, same concurrency, overlapping window, different harness. One arm producing 4 timeouts while another produced 15 rules out endpoint speed, because a slow endpoint penalizes both arms equally. In that campaign the slower arm also sent 3.4 times the input tokens for the same 89 tasks.
 
-Raising `agent_timeout_multiplier` is not a fix. It rescues the trials and destroys comparability with any published number. Lower concurrency or reduce reasoning effort instead, and report which you did.
+Raising `agent_timeout_multiplier` after seeing a bounded result does not repair that result. It creates a separate capability-policy evaluation that is not comparable to a published task-defined number. Preserve and label both.
 
 ## The same tasks stop timing out when rerun alone
 
@@ -66,7 +76,7 @@ A rerun of only the errored tasks fills fewer concurrent slots, so it runs at ma
 
 One campaign measured this directly: a c32 run produced 4 timeouts in one arm and 18 in the other; rerunning only those tasks eliminated 4 of 4 and 13 of 18. Per-stream throughput was 382 tokens per second idle against about 139 at c32.
 
-Do not respond by raising `agent_timeout_multiplier`, which changes benchmark semantics. Either accept the score as deadline-limited and label it, or rerun every task at lower concurrency for a comparable number. Report the lighter effective load of any subset rerun as a known confound rather than treating its outcomes as equivalent draws.
+Do not reinterpret a subset rerun as the original task-defined score. Either accept the bounded score as deadline-limited, rerun every task at lower concurrency for a comparable bounded number, or run the capability policy as a separately labelled evaluation. Report the lighter effective load of any subset rerun as a known confound rather than treating its outcomes as equivalent draws.
 
 ## Effectively unbounded agent phase never finishes
 
@@ -85,6 +95,10 @@ Do not kill, add a timeout, edit files, or inject guidance when the requested po
 ## `inf` becomes `null`
 
 Harbor 0.20.0 accepts an infinite timeout, but its JSON serialization writes `null` into `config.json` and `lock.json`. That loses the intended replay contract. Use a large finite multiplier and hash the resolved config.
+
+## Harbor omits `n_attempts` or concurrency from `config.json`
+
+Harbor 0.20.0 persists configs with default-valued fields excluded. Missing `n_attempts` means the documented default 1, and missing `n_concurrent_trials` means the documented default 4. The bundled summary and comparison tools resolve those two defaults only when `config.json` exists. Do not infer them when the file itself is missing.
 
 ## Claude Code HTTP 400 on a PDF
 
