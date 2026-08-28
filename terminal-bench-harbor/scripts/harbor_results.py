@@ -6,6 +6,7 @@ from typing import Any
 
 
 HARBOR_JOB_DEFAULTS = {"n_attempts": 1, "n_concurrent_trials": 4}
+SENSITIVE_ENV_MARKERS = ("key", "secret", "token", "password", "credential", "auth")
 
 
 def load_job(path: str | Path) -> tuple[dict[str, Any], dict[str, Any], Path]:
@@ -54,14 +55,38 @@ def is_passing_reward(reward: float) -> bool:
 
 def task_outcomes(eval_result: dict[str, Any]) -> dict[str, dict[str, Any]]:
     outcomes: dict[str, dict[str, Any]] = {}
+    trial_names: dict[str, set[str]] = {}
+    exception_types: dict[str, set[str]] = {}
+    passing_trials: dict[str, set[str]] = {}
+    agent_timeout_trials: set[str] = set()
     for trial, reward in reward_trials(eval_result):
         task = trial_task(trial)
         entry = outcomes.setdefault(
             task, {"passed": False, "attempts": 0, "rewards": []}
         )
         entry["passed"] = entry["passed"] or is_passing_reward(reward)
-        entry["attempts"] += 1
         entry["rewards"].append(reward)
+        trial_names.setdefault(task, set()).add(trial)
+        if is_passing_reward(reward):
+            passing_trials.setdefault(task, set()).add(trial)
+    for exception_type, trials in eval_result.get("exception_stats", {}).items():
+        if exception_type == "CancelledError":
+            continue
+        for trial in trials:
+            task = trial_task(trial)
+            outcomes.setdefault(task, {"passed": False, "attempts": 0, "rewards": []})
+            trial_names.setdefault(task, set()).add(trial)
+            exception_types.setdefault(task, set()).add(exception_type)
+            if exception_type == "AgentTimeoutError":
+                agent_timeout_trials.add(trial)
+    for task, entry in outcomes.items():
+        entry["attempts"] = len(trial_names[task])
+        entry["error_only"] = not entry["rewards"]
+        entry["exception_types"] = sorted(exception_types.get(task, set()))
+        entry["non_timeout_passed"] = any(
+            trial not in agent_timeout_trials
+            for trial in passing_trials.get(task, set())
+        )
     return outcomes
 
 
@@ -85,15 +110,91 @@ def load_config(path: str | Path) -> dict[str, Any]:
         return json.load(config_file)
 
 
+def is_sensitive_env_key(key: str) -> bool:
+    return any(marker in key.casefold() for marker in SENSITIVE_ENV_MARKERS)
+
+
+def is_persisted_credential_value(value: Any) -> bool:
+    return isinstance(value, str) and (
+        value in {"****", "[REDACTED]"}
+        or (value.startswith("${") and value.endswith("}"))
+        or (len(value) == 11 and value[4:8] == "****")
+    )
+
+
+def has_external_pi_registry_credential(config: dict[str, Any]) -> bool:
+    return any(
+        isinstance(agent, dict)
+        and isinstance(agent.get("env"), dict)
+        and "TB_PI_MODELS_SEMANTIC_SHA256" in agent["env"]
+        for agent in config.get("agents", [])
+    )
+
+
+def uncompared_credential_paths(
+    left: Any, right: Any, path: str = "$", *, environment: bool = False
+) -> list[str]:
+    if isinstance(left, dict) and isinstance(right, dict):
+        paths = (
+            ["$.pi_registry.apiKey"]
+            if path == "$"
+            and (
+                has_external_pi_registry_credential(left)
+                or has_external_pi_registry_credential(right)
+            )
+            else []
+        )
+        for key in sorted(set(left) & set(right)):
+            child = f"{path}.{key}"
+            if (
+                environment
+                and is_sensitive_env_key(key)
+                and (
+                    is_persisted_credential_value(left[key])
+                    or is_persisted_credential_value(right[key])
+                )
+            ):
+                paths.append(child)
+            else:
+                paths.extend(
+                    uncompared_credential_paths(
+                        left[key], right[key], child, environment=key == "env"
+                    )
+                )
+        return paths
+    if isinstance(left, list) and isinstance(right, list):
+        paths = []
+        for index, (left_item, right_item) in enumerate(zip(left, right)):
+            paths.extend(
+                uncompared_credential_paths(
+                    left_item,
+                    right_item,
+                    f"{path}[{index}]",
+                    environment=environment,
+                )
+            )
+        return paths
+    return []
+
+
 def normalized_config(
     config: dict[str, Any], ignored_keys: set[str] | None = None
 ) -> dict[str, Any]:
     ignored = {"job_name"} if ignored_keys is None else ignored_keys
     resolved = {**HARBOR_JOB_DEFAULTS, **config}
+    retry = resolved.get("retry")
+    if isinstance(retry, dict):
+        retry = {**retry}
+        for key in ("include_exceptions", "exclude_exceptions"):
+            if isinstance(retry.get(key), list):
+                retry[key] = sorted(set(retry[key]))
+        resolved["retry"] = retry
     return {key: value for key, value in resolved.items() if key not in ignored}
 
 
-def config_differences(left: Any, right: Any, path: str = "$") -> list[str]:
+def config_differences(
+    left: Any, right: Any, path: str = "$", *, environment: bool = False
+) -> list[str]:
     if type(left) is not type(right):
         return [path]
     if isinstance(left, dict):
@@ -102,8 +203,21 @@ def config_differences(left: Any, right: Any, path: str = "$") -> list[str]:
             child = f"{path}.{key}"
             if key not in left or key not in right:
                 differences.append(child)
+            elif (
+                environment
+                and is_sensitive_env_key(key)
+                and (
+                    is_persisted_credential_value(left[key])
+                    or is_persisted_credential_value(right[key])
+                )
+            ):
+                continue
             else:
-                differences.extend(config_differences(left[key], right[key], child))
+                differences.extend(
+                    config_differences(
+                        left[key], right[key], child, environment=key == "env"
+                    )
+                )
         return differences
     if isinstance(left, list):
         differences = []
@@ -112,7 +226,11 @@ def config_differences(left: Any, right: Any, path: str = "$") -> list[str]:
             if index >= len(left) or index >= len(right):
                 differences.append(child)
             else:
-                differences.extend(config_differences(left[index], right[index], child))
+                differences.extend(
+                    config_differences(
+                        left[index], right[index], child, environment=environment
+                    )
+                )
         return differences
     return [] if left == right else [path]
 
@@ -134,17 +252,32 @@ def summarize_eval(
     attempts: int,
     complete: bool,
     target_passes: int | None,
+    capability_mode: bool = True,
 ) -> dict[str, Any]:
     pairs = reward_trials(eval_result)
     outcomes = task_outcomes(eval_result)
     attempt_counts = task_attempt_counts(eval_result)
+    exception_tasks = sorted(
+        task for task, outcome in outcomes.items() if outcome["exception_types"]
+    )
+    agent_timeout_tasks = sorted(
+        task
+        for task, outcome in outcomes.items()
+        if "AgentTimeoutError" in outcome["exception_types"]
+    )
     passed_trials = sum(is_passing_reward(reward) for _, reward in pairs)
     failed_trials = sum(not is_passing_reward(reward) for _, reward in pairs)
-    successful_tasks = sum(entry["passed"] for entry in outcomes.values())
-    denominator = expected_tasks or len(outcomes)
-    lower_bound = successful_tasks / denominator if denominator else None
+    success_key = "non_timeout_passed" if capability_mode else "passed"
+    successful_tasks = sum(entry[success_key] for entry in outcomes.values())
+    observed_rate = successful_tasks / len(outcomes) if outcomes else None
+    lower_bound = successful_tasks / expected_tasks if expected_tasks else None
     exhausted_failures = sum(
-        not outcomes.get(task, {}).get("passed", False) and count >= attempts
+        not outcomes.get(task, {}).get(success_key, False)
+        and not (
+            capability_mode
+            and "AgentTimeoutError" in outcomes.get(task, {}).get("exception_types", [])
+        )
+        and count >= attempts
         for task, count in attempt_counts.items()
     )
     optimistic_successful_tasks = (
@@ -156,9 +289,10 @@ def summarize_eval(
         else None
     )
     expected_trials = expected_tasks * attempts if expected_tasks is not None else None
+    score_valid = complete and (not capability_mode or not agent_timeout_tasks)
     avg_at_attempts = (
         sum(reward for _, reward in pairs) / expected_trials
-        if complete and expected_trials
+        if score_valid and expected_trials
         else None
     )
     ungraded_trials = (
@@ -188,15 +322,21 @@ def summarize_eval(
         "expected_tasks": expected_tasks,
         "exhausted_failed_tasks": exhausted_failures,
         "optimistic_successful_tasks": optimistic_successful_tasks,
+        "observed_pass_rate": observed_rate,
         "avg_at_attempts": avg_at_attempts,
-        "pass_at_attempts": lower_bound if complete else None,
-        "partial_pass_at_attempts_lower_bound": None if complete else lower_bound,
-        "partial_pass_at_attempts_upper_bound": None if complete else upper_bound,
+        "pass_at_attempts": lower_bound if score_valid else None,
+        "partial_pass_at_attempts_lower_bound": None if score_valid else lower_bound,
+        "partial_pass_at_attempts_upper_bound": None if score_valid else upper_bound,
         "target_passes": target_passes,
         "target_reachable": target_reachable,
         "target_met": target_met,
         "harbor_pass_at_k": eval_result.get("pass_at_k", {}),
         "exception_stats": eval_result.get("exception_stats", {}),
+        "exception_tasks": exception_tasks,
+        "agent_timeout_tasks": agent_timeout_tasks,
+        "score_mode": "capability" if capability_mode else "task-defined deadline",
+        "score_valid": score_valid,
+        "requires_rerun": capability_mode and bool(agent_timeout_tasks),
     }
 
 
@@ -223,7 +363,10 @@ def summarize(path: str | Path, target_passes: int | None = None) -> dict[str, A
         raise ValueError(
             "config.json must contain a positive integer n_concurrent_trials"
         )
-    expected_tasks = expected_task_count(result, attempts, len(evals))
+    incomplete_expected_tasks = (
+        expected_task_count(result, attempts, 1) if len(evals) == 1 else None
+    )
+    capability_mode = config.get("agent_timeout_multiplier") is not None
     return {
         "path": str(result_path),
         "id": result.get("id"),
@@ -248,10 +391,15 @@ def summarize(path: str | Path, target_passes: int | None = None) -> dict[str, A
             summarize_eval(
                 key,
                 eval_result,
-                expected_tasks,
+                (
+                    len(task_outcomes(eval_result))
+                    if complete
+                    else incomplete_expected_tasks
+                ),
                 attempts,
                 complete,
                 target_passes,
+                capability_mode,
             )
             for key, eval_result in evals.items()
         ],

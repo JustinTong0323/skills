@@ -197,7 +197,9 @@ Text diffs and config hashes alone do not prove equivalence. Render both resolve
 python3 scripts/compare_configs.py PRIOR/config.json RERUN/config.json
 ```
 
-The command ignores top-level `job_name` and reports every remaining differing JSON path. Any additional difference requires an explicit comparison rationale or a new experiment axis.
+The command ignores top-level `job_name`, canonicalizes the set-valued retry exception lists, and reports every remaining differing JSON path. If either side contains Harbor's persisted `${VAR}`, `****`, `first4****last3`, or `[REDACTED]` form for a sensitive environment value, the command reports that path as unknown; two literal values remain strictly comparable. Verify unknown key identity separately. Any additional difference requires an explicit comparison rationale or a new experiment axis.
+
+For Pi, compare the recorded `TB_PI_MODELS_SEMANTIC_SHA256` value and mount source, archive the content-addressed registry, and verify its exact file hash. If the renderer refuses an existing registry because its content differs, do not overwrite it; use a new base path after resolving the unexpected credential or file drift.
 
 ## Runtime image or checkout drift
 

@@ -10,6 +10,7 @@ from harbor_results import (
     normalized_config,
     select_eval,
     task_outcomes,
+    uncompared_credential_paths,
 )
 
 
@@ -33,24 +34,46 @@ def compare(
     left = task_outcomes(left_eval)
     right = task_outcomes(right_eval)
     common = sorted(set(left) & set(right))
+    naturally_graded_common = [
+        task
+        for task in common
+        if not left[task]["exception_types"] and not right[task]["exception_types"]
+    ]
     categories = {
         "both_pass": [
-            task for task in common if left[task]["passed"] and right[task]["passed"]
+            task
+            for task in naturally_graded_common
+            if left[task]["passed"] and right[task]["passed"]
         ],
         "both_fail": [
             task
-            for task in common
+            for task in naturally_graded_common
             if not left[task]["passed"] and not right[task]["passed"]
         ],
         "left_only": [
             task
-            for task in common
+            for task in naturally_graded_common
             if left[task]["passed"] and not right[task]["passed"]
         ],
         "right_only": [
             task
-            for task in common
+            for task in naturally_graded_common
             if not left[task]["passed"] and right[task]["passed"]
+        ],
+        "both_exception": [
+            task
+            for task in common
+            if left[task]["exception_types"] and right[task]["exception_types"]
+        ],
+        "left_exception": [
+            task
+            for task in common
+            if left[task]["exception_types"] and not right[task]["exception_types"]
+        ],
+        "right_exception": [
+            task
+            for task in common
+            if not left[task]["exception_types"] and right[task]["exception_types"]
         ],
         "missing_left": sorted(set(right) - set(left)),
         "missing_right": sorted(set(left) - set(right)),
@@ -68,6 +91,14 @@ def compare(
         if all(config_available.values())
         else []
     )
+    unknown_credentials = (
+        uncompared_credential_paths(
+            normalized_config(left_config, ignored_config_keys),
+            normalized_config(right_config, ignored_config_keys),
+        )
+        if all(config_available.values())
+        else []
+    )
     return {
         "left": {"job_name": left_config.get("job_name"), "eval": left_key},
         "right": {"job_name": right_config.get("job_name"), "eval": right_key},
@@ -79,6 +110,10 @@ def compare(
             "available": config_available,
             "equivalent": not config_diff if all(config_available.values()) else None,
             "ignored_keys": sorted(ignored_config_keys),
+            "credential_values_compared": (
+                not unknown_credentials if all(config_available.values()) else None
+            ),
+            "uncompared_credential_paths": unknown_credentials,
             "different_paths": config_diff,
         },
         "counts": {name: len(tasks) for name, tasks in categories.items()},
@@ -100,6 +135,11 @@ def print_human(result: dict) -> None:
             "Config equivalent ignoring "
             f"{', '.join(config['ignored_keys'])}: {config['equivalent']}"
         )
+    if config["uncompared_credential_paths"]:
+        print(
+            "Credential values compared: False (verify key identity separately): "
+            + ", ".join(config["uncompared_credential_paths"])
+        )
     if config["different_paths"]:
         print("Config differences: " + ", ".join(config["different_paths"]))
     for name in (
@@ -107,6 +147,9 @@ def print_human(result: dict) -> None:
         "both_fail",
         "left_only",
         "right_only",
+        "both_exception",
+        "left_exception",
+        "right_exception",
         "missing_left",
         "missing_right",
     ):

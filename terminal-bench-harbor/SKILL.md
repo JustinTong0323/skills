@@ -1,7 +1,7 @@
 ---
 name: terminal-bench-harbor
-description: "Run Terminal-Bench 2.1 with Harbor against a local or remote SGLang/OpenAI/Anthropic-compatible endpoint. Use whenever the user mentions Terminal-Bench, TB2.1, Harbor evaluation, Terminus-2, Claude Code or Pi as a Harbor harness, Avg@k, pass@1/pass@k, or asks to benchmark an agentic model in Docker terminal tasks. Covers capability-first timeout policy, runner sizing, endpoint preflight, contention preflight, reproducible configs, smoke gates, detached execution, score-ceiling monitoring, completion audits, harness comparison, error-only rerun unions, and failure attribution."
-version: 1.4.0
+description: "Run Terminal-Bench 2.1 with Harbor against a local or remote SGLang/OpenAI/Anthropic-compatible endpoint. Use whenever the user mentions Terminal-Bench, TB2.1, Harbor evaluation, Terminus-2, Claude Code or Pi as a Harbor harness, Avg@k, pass@1/pass@k, or asks to benchmark an agentic model in Docker terminal tasks. Covers capability-first timeout policy, runner sizing, endpoint preflight, contention preflight, reproducible configs, smoke gates, detached execution, score-ceiling monitoring, completion audits, harness comparison, exception rerun unions, and failure attribution."
+version: 1.4.1
 ---
 
 # Terminal-Bench with Harbor
@@ -152,7 +152,7 @@ python3 "$TB_HARBOR_SKILL_DIR/scripts/compare_configs.py" \
   /home/ubuntu/tb21/configs/RERUN.json
 ```
 
-The comparison ignores only top-level `job_name` by default, exits 0 when the remaining structure is identical, and exits 1 with the differing JSON paths otherwise. Use `--ignore-key` only for another explicitly approved identity-only field.
+The comparison ignores top-level `job_name`, canonicalizes Harbor's set-valued retry exception lists, exits 0 when the remaining structure is identical, and exits 1 with the differing JSON paths otherwise. When either side contains Harbor's persisted `${VAR}`, `****`, `first4****last3`, or `[REDACTED]` form for a sensitive environment value, that path is reported as unknown instead of as a false difference; two literal values are still compared. Verify and record every unknown key identity separately. Use `--ignore-key` only for another explicitly approved identity-only field.
 
 Harbor 0.20.0 writes `config.json` with default-valued fields omitted. The bundled tools resolve the documented defaults `n_attempts=1` and `n_concurrent_trials=4` before summarizing or comparing configs. They still require `config.json`; a missing artifact is not permission to infer run semantics.
 
@@ -173,7 +173,7 @@ RuntimeError
 NetworkConnectionError
 ```
 
-Do not silently retry `AgentTimeoutError`, `NonZeroAgentExitCodeError`, verifier failures, or model answers.
+Do not retry `AgentTimeoutError`, `NonZeroAgentExitCodeError`, verifier failures, or model answers silently inside the same scoring job. An `AgentTimeoutError` invalidates the capability score even when Harbor emits a zero reward; start an auditable rerun and preserve the original artifact.
 
 ## Phase 3: run two smoke gates
 
@@ -313,6 +313,7 @@ Declare a job complete only when authoritative evidence proves all conditions:
 - the Harbor driver exited and its exit status is known;
 - task containers for the job are gone when deletion is enabled;
 - aggregate `result.json` and `config.json` hashes are recorded;
+- Pi's mounted content-addressed registry and its hash are archived when Pi is used;
 - errors and retries are enumerated by type and trial;
 - the SGLang server remained healthy or every outage interval is accounted for.
 
@@ -323,7 +324,7 @@ python3 "$TB_HARBOR_SKILL_DIR/scripts/summarize_job.py" /home/ubuntu/tb21/jobs/R
 sha256sum /home/ubuntu/tb21/jobs/RUN/result.json /home/ubuntu/tb21/jobs/RUN/config.json
 ```
 
-For a complete balanced k-attempt job, the summary reports both Avg@k and Pass@k. Avg@k is the mean reward across all task-attempt slots; Pass@k is the fraction of tasks with at least one pass. Errors remain zero-valued slots in the strict result.
+For a complete balanced k-attempt capability job without `AgentTimeoutError`, the summary reports both Avg@k and Pass@k. Avg@k is the mean reward across all task-attempt slots; Pass@k is the fraction of tasks with at least one pass. Non-timeout terminal errors remain zero-valued slots in the strict result; timeout-bearing tasks invalidate the capability score and require an auditable rerun. A task-defined run instead retains a labeled deadline score where `AgentTimeoutError` is an in-protocol terminal outcome.
 
 A watchdog notification, a background-task completion event, or a `wait` that returns is not a completion signal either. Before auditing, re-read the direct signals: a non-null `finished_at`, the recorded driver exit status file, and the absence of the driver PID. Only those count. An audit begun on an indirect signal has to be retracted when the direct ones disagree.
 
@@ -336,7 +337,7 @@ An intentionally stopped job is not complete even if its finalized stats say eve
 - record the exact cutoff condition, snapshot time, signal target, and driver exit;
 - list trials that completed or were cancelled during the shutdown race.
 
-Before releasing an ephemeral CPU runner or GPU server, copy aggregate `result.json`, resolved `config.json`, cutoff snapshots, driver/watchdog logs, and relevant server logs to durable storage. Verify hashes after transfer. Trial directories can be retained selectively when their size makes full archival impractical.
+Before releasing an ephemeral CPU runner or GPU server, copy aggregate `result.json`, resolved `config.json`, the Pi registry when applicable, cutoff snapshots, driver/watchdog logs, and relevant server logs to durable storage. Verify hashes after transfer. Trial directories can be retained selectively when their size makes full archival impractical.
 
 ## Phase 7: compare harnesses and report
 
@@ -358,13 +359,13 @@ Report:
 - whether the score is capability-first or task-defined. Any `AgentTimeoutError` means the run did not produce a complete capability score and the report must say so;
 - wall time, tokens, and reported cost separately;
 - error and retry counts by category;
-- paired both-pass, both-fail, left-only, and right-only tasks;
+- paired both-pass, both-fail, left-only, right-only, and exception-bearing tasks;
 - harness, protocol, reasoning, sampling, timeout, and server differences;
 - infrastructure incidents and whether they affected scoring.
 
 An official-score gap is not a model regression until harness and protocol differences are controlled. A published run may use a private harness, different prompt profile, sampling policy, tool protocol, or timeout behavior. When that setup is unavailable, report the local run as a different harness evaluation rather than a strict reproduction.
 
-For stochastic pass@1 reruns, compare outcomes only on tasks that reached natural grading in both jobs. Report both directions of task flips and the net change. A headline score difference without paired task churn can hide large run-to-run variance.
+For stochastic pass@1 reruns, compare outcomes only on tasks that reached natural grading without a non-cancelled exception in both jobs. Harbor may attach both an exception and a zero reward to one trial; that is still an exception-bearing task, not a natural model failure. Report both directions of task flips, exception-bearing tasks, and the net change. A headline score difference without paired task churn can hide large run-to-run variance.
 
 ## Phase 8: Avg@k and Pass@k
 
@@ -388,9 +389,9 @@ Validate Harbor's Avg@k and pass-at-k output independently with `summarize_job.p
 
 Do not automatically merge Avg@k across a base job and top-up jobs. A valid effective ledger must record the original task-attempt slot, the exclusion reason, the replacement job and trial, the frozen config axes, and a predeclared first-k selection order. Wrong-endpoint attempts, timeout replacements, and later retries cannot be distinguished safely from aggregate files alone. Keep the strict base score and label any lineage-backed replacement score as adjusted.
 
-## Phase 8b: error-only reruns and union scores
+## Phase 8b: exception reruns and union scores
 
-The default capability-first policy should not produce `AgentTimeoutError`. If one appears, first verify that the resolved `config.json` contains `agent_timeout_multiplier: 1000000000.0`; a missing multiplier means the wrong policy ran.
+The default capability-first policy should not produce `AgentTimeoutError`. If one appears, first verify that the resolved `config.json` contains `agent_timeout_multiplier: 1000000000.0`; a missing multiplier means the wrong policy ran. Treat every task listed under `agent_timeout_tasks` as requiring rerun even when Harbor also emitted a zero reward. Do not count that zero as model evidence, and do not declare the capability score final while any such task remains.
 
 For a task-defined deadline run, rerunning only the errored or failed tasks in a new job is legitimate, and its union with the base run is sound arithmetic. A task that already passed cannot un-pass, so the union equals what a full rerun would have produced; retrying only failures is not cherry-picking for a union metric. Two constraints hold anyway:
 

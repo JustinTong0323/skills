@@ -77,26 +77,27 @@ Agent setup downloads the Claude CLI inside task environments. A setup download 
 
 ## Pi
 
-The Harbor Pi adapter does not generate a custom provider registry. Mount an owner-only model file into every task:
+The Harbor Pi adapter does not generate a custom provider registry. The renderer creates an owner-only, content-addressed model file and mounts it into every task:
 
 ```json
 {
   "type": "bind",
-  "source": "/home/ubuntu/tb21/pi/models.json",
+  "source": "/home/ubuntu/tb21/pi/models.sha256-DIGEST.json",
   "target": "/root/.pi/agent/models.json",
   "read_only": true
 }
 ```
 
-The renderer writes a provider with `api: openai-completions`, the OpenAI `/v1` base, a reasoning-effort mapping, context and output limits, zero local cost, and reasoning replay support. Keep the job `--output` and `--pi-models-path` as distinct files; the renderer rejects aliased paths. Use:
+The renderer writes a provider with `api: openai-completions`, the OpenAI `/v1` base, a reasoning-effort mapping, context and output limits, zero local cost, and reasoning replay support. `--pi-models-path` is a base filename: the mounted source adds a semantic SHA-256 that excludes the credential value, and the same identity cannot be overwritten with different content. Keep it distinct from `--output`. The job config records the semantic digest; archive the resolved source file named in the mount and verify its exact file hash. Use:
 
 ```text
 --agent pi
---model sglang/MODEL_ID
---agent-kwarg thinking=xhigh
---agent-env PI_OFFLINE=1
---agent-env PI_SKIP_VERSION_CHECK=1
+--model MODEL_ID
+--pi-thinking xhigh
+--pi-models-path /home/ubuntu/tb21/pi/models.json
 ```
+
+The renderer sets `PI_OFFLINE=1` and `PI_SKIP_VERSION_CHECK=1` in the agent environment.
 
 Stock Harbor 0.20.0 passes the full task instruction as the Pi process's positional argv. Two consequences were confirmed on TB2.1:
 

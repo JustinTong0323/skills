@@ -25,15 +25,32 @@ def print_human(summary: dict) -> None:
         mean = eval_summary["mean"]
         mean_text = "n/a" if mean is None else f"{100 * mean:.2f}%"
         print(f"Eval: {eval_summary['key']}")
+        print(f"Score mode: {eval_summary['score_mode']}")
         print(
-            f"Reward mean: {mean_text}; passed trials: {eval_summary['passed_trials']}; "
-            f"failed trials: {eval_summary['failed_trials']}"
+            f"Raw Harbor reward mean: {mean_text}; "
+            f"passed reward records: {eval_summary['passed_trials']}; "
+            f"failed reward records: {eval_summary['failed_trials']}"
         )
         print(
             f"Graded reward records: {eval_summary['graded_trials']}/"
             f"{eval_summary['expected_trials']}; "
             f"ungraded: {eval_summary['ungraded_trials']}"
         )
+        if eval_summary["requires_rerun"]:
+            print(
+                "AgentTimeoutError tasks require rerun: "
+                + ", ".join(eval_summary["agent_timeout_tasks"])
+            )
+        elif eval_summary["agent_timeout_tasks"]:
+            print(
+                "AgentTimeoutError task-defined deadline outcomes: "
+                + ", ".join(eval_summary["agent_timeout_tasks"])
+            )
+        score_label = f"Final {eval_summary['score_mode']} score"
+        if eval_summary["requires_rerun"]:
+            print(f"{score_label}: unavailable; AgentTimeoutError rerun required")
+        elif not eval_summary["score_valid"]:
+            print(f"{score_label}: unavailable; job incomplete")
         avg_at_attempts = eval_summary["avg_at_attempts"]
         if avg_at_attempts is not None:
             print(f"Avg@{summary['n_attempts']}: {100 * avg_at_attempts:.2f}%")
@@ -44,7 +61,10 @@ def print_human(summary: dict) -> None:
                 f"{eval_summary['successful_tasks']}/{eval_summary['expected_tasks']} "
                 f"({100 * pass_at_attempts:.2f}%)"
             )
-        elif eval_summary["partial_pass_at_attempts_lower_bound"] is not None:
+        elif (
+            eval_summary["partial_pass_at_attempts_lower_bound"] is not None
+            and eval_summary["partial_pass_at_attempts_upper_bound"] is not None
+        ):
             lower = eval_summary["partial_pass_at_attempts_lower_bound"]
             upper = eval_summary["partial_pass_at_attempts_upper_bound"]
             print(
@@ -53,6 +73,13 @@ def print_human(summary: dict) -> None:
                 f"{eval_summary['optimistic_successful_tasks']}/"
                 f"{eval_summary['expected_tasks']} "
                 f"({100 * lower:.2f}%-{100 * upper:.2f}%); not final"
+            )
+        elif eval_summary["observed_pass_rate"] is not None:
+            observed = eval_summary["observed_pass_rate"]
+            print(
+                f"Observed Pass@{summary['n_attempts']} rate: "
+                f"{eval_summary['successful_tasks']}/{eval_summary['observed_tasks']} "
+                f"({100 * observed:.2f}%); final denominator unknown"
             )
         if eval_summary["target_passes"] is not None:
             reachable = eval_summary["target_reachable"]

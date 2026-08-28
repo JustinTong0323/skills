@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
 from pathlib import Path
+import re
+import tempfile
 from typing import Any
 
 
@@ -19,6 +22,10 @@ def api_bases(value: str) -> tuple[str, str]:
 
 def prefixed_model(prefix: str, model: str) -> str:
     return model if model.startswith(f"{prefix}/") else f"{prefix}/{model}"
+
+
+def unprefixed_model(prefix: str, model: str) -> str:
+    return model.removeprefix(f"{prefix}/")
 
 
 def retry_config(max_retries: int, exceptions: list[str]) -> dict[str, Any]:
@@ -76,6 +83,7 @@ def pi_agent(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def pi_models(args: argparse.Namespace, openai_base: str) -> dict[str, Any]:
+    model = unprefixed_model(args.pi_provider, args.model)
     return {
         "providers": {
             args.pi_provider: {
@@ -95,8 +103,8 @@ def pi_models(args: argparse.Namespace, openai_base: str) -> dict[str, Any]:
                 },
                 "models": [
                     {
-                        "id": args.model,
-                        "name": f"{args.model} via {args.pi_provider}",
+                        "id": model,
+                        "name": f"{model} via {args.pi_provider}",
                         "reasoning": True,
                         "thinkingLevelMap": {
                             "off": None,
@@ -121,6 +129,40 @@ def pi_models(args: argparse.Namespace, openai_base: str) -> dict[str, Any]:
             }
         }
     }
+
+
+def pi_registry_semantic_digest(models: dict[str, Any]) -> str:
+    semantic = json.loads(json.dumps(models))
+    for provider in semantic["providers"].values():
+        provider["apiKey"] = "<credential>"
+    payload = json.dumps(
+        semantic, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def content_addressed_path(path: str | Path, digest: str) -> Path:
+    requested = Path(path)
+    suffix = requested.suffix or ".json"
+    stem = requested.stem if requested.suffix else requested.name
+    return requested.with_name(f"{stem}.sha256-{digest}{suffix}")
+
+
+def is_content_addressed_registry_path(
+    candidate: str | Path, base_path: str | Path
+) -> bool:
+    requested = Path(base_path)
+    suffix = requested.suffix or ".json"
+    stem = requested.stem if requested.suffix else requested.name
+    candidate_path = Path(candidate)
+    return (
+        candidate_path.resolve().parent == requested.resolve().parent
+        and re.fullmatch(
+            rf"{re.escape(stem)}\.sha256-[0-9a-f]{{64}}{re.escape(suffix)}",
+            candidate_path.name,
+        )
+        is not None
+    )
 
 
 def build_job(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -158,28 +200,62 @@ def build_job(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any] 
             raise ValueError(
                 "--output and --pi-models-path must refer to different files"
             )
+        if is_content_addressed_registry_path(args.output, args.pi_models_path):
+            raise ValueError(
+                "--output cannot target a content-addressed Pi registry in the "
+                "--pi-models-path namespace"
+            )
+        models = pi_models(args, openai_base)
+        digest = pi_registry_semantic_digest(models)
+        registry_path = content_addressed_path(args.pi_models_path, digest)
+        if Path(args.output).resolve() == registry_path.resolve():
+            raise ValueError(
+                "--output and the content-addressed Pi registry must refer to different files"
+            )
+        job["agents"][0]["env"]["TB_PI_MODELS_SEMANTIC_SHA256"] = f"sha256:{digest}"
         job["environment"] = {
             "type": "docker",
             "mounts": [
                 {
                     "type": "bind",
-                    "source": args.pi_models_path,
+                    "source": str(registry_path),
                     "target": "/root/.pi/agent/models.json",
                     "read_only": True,
                 }
             ],
         }
-        models = pi_models(args, openai_base)
     return job, models
 
 
-def write_json(path: str | Path, data: dict[str, Any]) -> None:
+def write_json(
+    path: str | Path, data: dict[str, Any], *, overwrite: bool = True
+) -> None:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w") as output:
-        json.dump(data, output, indent=2, allow_nan=False)
-        output.write("\n")
+    payload = (json.dumps(data, indent=2, allow_nan=False) + "\n").encode()
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=destination.parent,
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        if overwrite:
+            os.replace(temporary, destination)
+        else:
+            try:
+                os.link(temporary, destination)
+            except FileExistsError:
+                if destination.read_bytes() != payload:
+                    raise ValueError(
+                        f"{destination} already exists with different content"
+                    ) from None
+    finally:
+        temporary.unlink(missing_ok=True)
     os.chmod(destination, 0o600)
 
 
@@ -272,11 +348,13 @@ def main() -> None:
     args = parse_args()
     try:
         job, models = build_job(args)
-    except ValueError as error:
+        if models is not None:
+            registry_path = job["environment"]["mounts"][0]["source"]
+            write_json(registry_path, models, overwrite=False)
+            print(f"Pi registry: {registry_path}")
+        write_json(args.output, job)
+    except (OSError, ValueError) as error:
         raise SystemExit(str(error)) from error
-    write_json(args.output, job)
-    if models is not None:
-        write_json(args.pi_models_path, models)
 
 
 if __name__ == "__main__":
