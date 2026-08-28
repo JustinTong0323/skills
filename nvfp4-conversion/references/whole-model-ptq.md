@@ -29,7 +29,7 @@ Find the architecture-specific Model Optimizer example and recipe at the pinned 
 
 Prefer the official architecture adapter and unified HF exporter. Do not adapt the routed-expert slice model for a dense checkpoint.
 
-For W4A4 NVFP4, default to the Four-Over-Six scale-selection recipe (`NVFP4_FOUR_OVER_SIX_CFG` / `--qformat nvfp4_four_over_six`, or `four_over_six: true` weight quantizers in a custom recipe) with the standard recipe as control — see [conversion-contract.md](conversion-contract.md). Scope recipes (for example experts-only) compose with 4/6 the same way as with the standard recipe; 4/6 changes only how weight block scales are chosen.
+For W4A4 NVFP4, default to the Four-Over-Six scale-selection recipe (`NVFP4_FOUR_OVER_SIX_CFG` / `--qformat nvfp4_four_over_six`, or a custom recipe whose `algorithm` block is `method: mse` with amax multipliers `[1.0, 1.5]` (`step_size: 0.5`, `fp8_scale_sweep: false`) and `four_over_six: true` weight quantizers — the flag alone with `method: max` is plain abs-max, not 4/6) with the standard recipe as control — see [conversion-contract.md](conversion-contract.md). Scope recipes (for example experts-only) compose with 4/6 the same way as with the standard recipe; 4/6 changes only how weight block scales are chosen.
 
 ## Resource Preflight
 
@@ -68,6 +68,14 @@ Actual option names come from the pinned entry point. Record the exact executed 
 Capture stdout/stderr and exit status. A zero exit code permits audit; it is not a pass.
 
 ## Real Activation Capture
+
+## Calibration Budget By What Actually Consumes It
+
+Weight-side statistics in the NVFP4 W4A4 recipes above (max abs-max and the 4/6 MSE sweep alike) are computed from the weight tensors alone — calibration text does not change the exported `weight`/`weight_scale`/`weight_scale_2` values, and cold experts that never see a token still get fully calibrated weight scales. Calibration data only feeds activation-side amax: the input quantizers (exported as tensor-wide `input_scale`) and any KV bmm quantizers. Consequences:
+
+- With dynamic input quantization plus a unit `input_scale` contract and no exported k/v scale tensors, the pipeline degenerates to RTN — a handful of samples (8-64) yields bit-identical expert weights to 1024. Spend sample count only for credible `quant_summary` metadata and for the protocol's declared calibration identity, not for numerics.
+- Large calibration sets become a first-order variable again when any of these hold: static input quantizers (amax is baked in, representativeness matters), GPTQ/AWQ/SmoothQuant-style second-order paths (activations drive the weight transform), activation-weighted MSE (local-Hessian), or static KV-cache quantization.
+- The 4/6 MSE sweep itself is weight-only and never a reason to raise sample count.
 
 When the architecture cannot synthesize calibration (for example no post-attention RMSNorm), capture real hidden-state activations from the serving path. Observed pitfalls:
 

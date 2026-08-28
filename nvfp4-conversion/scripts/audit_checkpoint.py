@@ -11,6 +11,14 @@ NVFP4_GROUP_SIZE = 16
 PROTECTED_BASE = re.compile(r"(^|\.)(mtp|gate|router)(\.|$)")
 
 
+def mtp_layer_prefix(config: dict) -> str | None:
+    # HF GLM names the nextn layer model.layers.<num_hidden_layers>.* with no "mtp" substring
+    layers = config.get("num_hidden_layers")
+    if isinstance(layers, int) and config.get("num_nextn_predict_layers"):
+        return f"model.layers.{layers}."
+    return None
+
+
 def quantized_layers(output: Path, contract: Path | None) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     if contract:
         data = load_json(contract)
@@ -73,7 +81,7 @@ def main() -> None:
     if args.rows_per_chunk <= 0:
         raise ValueError("--rows-per-chunk must be positive")
 
-    load_json(args.source / "config.json")
+    source_config = load_json(args.source / "config.json")
     output_config = load_json(args.output_checkpoint / "config.json")
     source = checkpoint_layout(args.source)
     output = checkpoint_layout(args.output_checkpoint)
@@ -96,12 +104,23 @@ def main() -> None:
         raise ValueError("config.json and precision contract disagree on the FP8 KV-cache declaration")
     if kv_cache_algorithm == "FP8" and kv_cache_scheme != {"dynamic": False, "num_bits": 8, "type": "float"}:
         raise ValueError("config.json kv_cache_scheme does not represent the FP8 precision contract")
-    protected = sorted(base for base in layer_map if PROTECTED_BASE.search(base))
+    mtp_prefix = mtp_layer_prefix(source_config)
+    protected = sorted(
+        base
+        for base in layer_map
+        if PROTECTED_BASE.search(base) or (mtp_prefix and base.startswith(mtp_prefix))
+    )
     if protected and not args.allow_quantized_protected:
         raise ValueError(
             "protected modules appear in quantized_layers; pass --allow-quantized-protected only with a "
             f"dedicated recipe and independent qualification: {protected[:10]}"
         )
+    # Exported attention k/v bmm scales silently corrupt MLA serving in sglang;
+    # official NVFP4 checkpoints ship none, so treat their presence as a violation.
+    kv_scale_leaked = sorted(key for key in output["tensor_metadata"] if key.endswith(".k_scale") or key.endswith(".v_scale"))
+    if kv_scale_leaked:
+        raise ValueError(f"KV bmm scale tensors must not ship in the checkpoint: {kv_scale_leaked[:10]}")
+
     source_meta = source["tensor_metadata"]
     output_meta = output["tensor_metadata"]
     transformed_source_keys = set()
@@ -142,7 +161,11 @@ def main() -> None:
         )
 
     unchanged_keys = sorted(set(source_meta) - transformed_source_keys)
-    mtp_keys = [key for key in unchanged_keys if key.startswith("mtp.") or ".mtp." in key]
+    mtp_keys = [
+        key
+        for key in unchanged_keys
+        if key.startswith("mtp.") or ".mtp." in key or (mtp_prefix and key.startswith(mtp_prefix))
+    ]
     unchanged_bytes = 0
     for key in unchanged_keys:
         if output_meta[key] != source_meta[key]:

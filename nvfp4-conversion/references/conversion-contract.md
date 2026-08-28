@@ -90,11 +90,20 @@ Adaptive block scaling ("Four Over Six", arXiv:2512.02010) quantizes each weight
 
 Model Optimizer ships the official implementation as `mtq.NVFP4_FOUR_OVER_SIX_CFG`, usable through `mtq.quantize` with HF or Megatron export. The config exists on main since before the reference commits above; release 0.46.0 is the first tag containing it. Sharp edges:
 
+- **`four_over_six: true` inside a custom recipe's weight-quantizer cfg does NOT enable the adaptive selection.** The flag only switches E4M3 scale normalization from 448 to 256 (headroom for M=4 scales). The per-block M=4/M=6 choice is made by a weight-only MSE sweep over amax multipliers [1.0, 1.5] (`1.0` = map block max to 6, `1.5` = map to 4, lower reconstruction MSE wins). A recipe with `algorithm: method: max` plus the flag therefore produces plain abs-max quantization with 256-normalization — a valid checkpoint but NOT 4/6, and mislabeling it corrupts every downstream A/B. True 4/6 requires the `algorithm` block from the official preset `modelopt_recipes/configs/ptq/presets/model/nvfp4_four_over_six.yaml`: `method: mse`, `fp8_scale_sweep: false`, `start_multiplier: 1.0`, `stop_multiplier: 1.5`, `step_size: 0.5`. The sweep quantizes only weight tensors (original vs dequantized block MSE), so its result is independent of calibration data and sample count; the activation forward pass only feeds activation-side amax, which this recipe never bakes into the weight artifact.
+
 - It is weight-side only; activations stay on ordinary dynamic NVFP4.
 - `mtq.compress` does not preserve the per-block M=4/M=6 choice — export through `mtq.quantize` paths only.
 - Do not combine it with second-order optimization recipes; the paper measured a 34.6% perplexity-gap increase with GPTQ.
 
 Declare the choice in the conversion manifest as part of recipe identity. It complements, and does not replace, sensitive-layer exemption.
+
+### Serving-Time Scale-Tensor Traps (Measured)
+
+Two export-side scale contracts bite at serve time and are invisible to structural audits:
+
+- **Attention k/v bmm scales are poison for sglang MLA.** An export that includes `model.layers.N.self_attn.k_proj.k_scale` / `v_proj.v_scale` (produced when the recipe enables `*[kv]_bmm_quantizer` for FP8 KV) gets silently hooked into the MLA attention path by sglang: the v-projection output is multiplied by `v_scale` (~2e-5), attention collapses, and generation degrades to repetition after the first token — with zero warnings and all structural audits green. The official `nvidia/GLM-5.2-NVFP4` checkpoint declares FP8 KV but ships **zero** such tensors. Contract: enable the bmm quantizers so `kv_cache_quant_algo: FP8` is declared, but **strip the `.k_scale`/`.v_scale` tensors at assembly** and treat their presence as an audit failure. (Evidence class: binary 0/5 → 5/5 serve battery with tensor presence as the only variable; official checkpoint serving healthy on the same runtime.)
+- **Expert `input_scale` is `amax / (6 × 448)`, not an uncalibrated default.** On fused-experts models the shared per-layer-per-projection input quantizer collects a real activation amax during calibration and the export replicates it to every expert — identical values across the experts of a layer are by design. The official checkpoint ships `input_scale = 1.0` (the `constant_amax: 2688` = `6 × 448` contract; see ModelOpt's `nvfp4_experts_only_input_scale1-kv_fp8_cast` recipe). sglang's `modelopt_fp4` cutedsl path is measured insensitive to the value (byte-identical output for ~1e-4 vs 1.0), but other runtimes may consume it asymmetrically — ship `1.0` unless you have a reason to keep the calibrated variant.
 
 ## Calibration Contract
 
