@@ -82,16 +82,19 @@ Treat KV-cache quantization separately from weight conversion. A recipe name end
 
 MTP policy must be explicit. If excluded, require source-identical content. If quantized, require a dedicated supported recipe and independent runtime qualification; never let MTP be quantized by an accidental wildcard.
 
-### Optional Adaptive Block Scaling (4/6)
+### Adaptive Block Scaling (4/6) — Default Scale Selection
 
 Adaptive block scaling ("Four Over Six", arXiv:2512.02010) quantizes each weight block twice — scaled to a maximum of 6 and of 4 — and keeps the version with lower per-block MSE, reducing error on the near-maximal values that dominate NVFP4 degradation. The exported format is unchanged (packed E2M1, E4M3 block scales, FP32 tensor scale, with block scales normalized by 256 instead of 448 for M=4 headroom), so runtime kernels and the tensor audit contract are unaffected; only scale selection changes.
 
-Model Optimizer ships an official implementation, `mtq.NVFP4_FOUR_OVER_SIX_CFG`, usable through `mtq.quantize` with HF or Megatron export. The config exists on main since before the reference commit above; release 0.46.0 is the first tag containing it. Two sharp edges:
+**4/6 is the default for whole-model W4A4 NVFP4 conversion.** Evidence beyond the paper's perplexity gains: a controlled paired A/B on a 300B-class hybrid MoE reasoning model (unfused experts, 36,423 NVFP4 bases, ModelOpt 0.46.0) found accuracy statistically indistinguishable from the standard recipe (GSM8K 5,276 pairs, delta -0.11pt, 95% CI [-0.45, +0.23]; AIME26 120 pairs, delta +0.83pt, CI [-5.83, +7.50]) with leaner long-horizon thinking (AIME26 p50 -11%, p90 -31%). Default to `NVFP4_FOUR_OVER_SIX_CFG` (or a recipe with `four_over_six: true` weight quantizers); keep the standard recipe as the control arm. The default is a prior, not a guarantee — for a new model family, still run the paired A/B from [validation-and-release.md](validation-and-release.md) before claiming the benefit in a release.
+
+Model Optimizer ships the official implementation as `mtq.NVFP4_FOUR_OVER_SIX_CFG`, usable through `mtq.quantize` with HF or Megatron export. The config exists on main since before the reference commits above; release 0.46.0 is the first tag containing it. Sharp edges:
 
 - It is weight-side only; activations stay on ordinary dynamic NVFP4.
 - `mtq.compress` does not preserve the per-block M=4/M=6 choice — export through `mtq.quantize` paths only.
+- Do not combine it with second-order optimization recipes; the paper measured a 34.6% perplexity-gap increase with GPTQ.
 
-Declare the variant in the conversion manifest as part of recipe identity — output bytes change, so it requires full requalification. Published PTQ gains are perplexity and simple-task results on small dense models, and the method degraded GPTQ-based quantization in the same study. Do not combine it with second-order optimization recipes, and do not adopt it for a release without a controlled A/B against the standard recipe under the paired multi-seed protocol, thinking-length distribution, and agentic benchmark in [validation-and-release.md](validation-and-release.md). It complements, and does not replace, sensitive-layer exemption.
+Declare the choice in the conversion manifest as part of recipe identity. It complements, and does not replace, sensitive-layer exemption.
 
 ## Calibration Contract
 
