@@ -31,6 +31,8 @@ Never place an access token in a command argument, script, log, manifest, model 
 
 Read [conversion-contract.md](references/conversion-contract.md) before selecting a path or starting conversion.
 
+Read [online-nvfp4-serving.md](references/online-nvfp4-serving.md) before committing to offline conversion: on Blackwell serving targets, SGLang `--quantization nvfp4_online` may make a converted checkpoint unnecessary.
+
 Read exactly one path reference after preflight:
 
 - [whole-model-ptq.md](references/whole-model-ptq.md) for official whole-model PTQ/export.
@@ -110,6 +112,8 @@ Inspect config and weight metadata without loading all tensors. Resolve:
 Create an immutable conversion manifest before expensive work. Any input that can change output bytes belongs in its identity.
 
 ### 2. Select The Conversion Path
+
+First confirm an offline artifact is needed at all. If the target is Blackwell serving of a BF16/FP16/FP8 MoE checkpoint on a supported FlashInfer backend and no consumer requires a serialized NVFP4 checkpoint, serve the source with `--quantization nvfp4_online` instead (see [online-nvfp4-serving.md](references/online-nvfp4-serving.md)) and skip conversion.
 
 Choose **whole-model PTQ/export** only when all are true:
 
