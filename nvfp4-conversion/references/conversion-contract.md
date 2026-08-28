@@ -2,13 +2,17 @@
 
 ## Dependency Boundary
 
-Use unmodified NVIDIA Model Optimizer source resolved to an exact commit. A commit known to have passed whole-model and routed-expert qualification on Blackwell-class hardware is:
+Use unmodified NVIDIA Model Optimizer source resolved to an exact commit. Commits with full gate-chain qualification on Blackwell-class hardware:
 
 ```text
-87c9f8cf83021957d1a1a575c90c9a4eaaf7ef0c
+87c9f8cf83021957d1a1a575c90c9a4eaaf7ef0c   # whole-model + routed-expert qualification (pre-0.46 main)
+43fd41a58d52c4e6e5dec1d1ff5989ecc737ae1a   # 0.46.0: whole-model W4A4 on a 300B-class hybrid MoE
+                                          # (unfused experts, KDA+DSA+MLA attention, MTP layer),
+                                          # standard and four_over_six recipes; audit, serve/smoke,
+                                          # and paired multi-seed quality gates passed 2026-08-27
 ```
 
-Treat this as a reference snapshot, not a promise for every architecture. Resolve a requested moving ref once at the start of a fresh generation. Never let it advance during conversion or resume.
+Treat these as reference snapshots, not promises for every architecture. Resolve a requested moving ref once at the start of a fresh generation. Never let it advance during conversion or resume.
 
 Record exact Python, PyTorch, CUDA, Transformers, Datasets, Safetensors, Hugging Face Hub, and Model Optimizer versions; GPU family/count; conversion image; normalized environment; executable artifact hashes; and all output-affecting arguments. Disable undeclared user-site packages.
 
