@@ -29,7 +29,7 @@ Find the architecture-specific Model Optimizer example and recipe at the pinned 
 
 Prefer the official architecture adapter and unified HF exporter. Do not adapt the routed-expert slice model for a dense checkpoint.
 
-For W4A4 NVFP4, default to the Four-Over-Six scale-selection recipe (`NVFP4_FOUR_OVER_SIX_CFG` / `--qformat nvfp4_four_over_six`, or a custom recipe whose `algorithm` block is `method: mse` with amax multipliers `[1.0, 1.5]` (`step_size: 0.5`, `fp8_scale_sweep: false`) and `four_over_six: true` weight quantizers — the flag alone with `method: max` is plain abs-max, not 4/6) with the standard recipe as control — see [conversion-contract.md](conversion-contract.md). Scope recipes (for example experts-only) compose with 4/6 the same way as with the standard recipe; 4/6 changes only how weight block scales are chosen.
+For W4A4 NVFP4, use the standard recipe by default; Four-Over-Six is an A/B-gated option — see [conversion-contract.md](conversion-contract.md). When converting with 4/6, use `NVFP4_FOUR_OVER_SIX_CFG` / `--qformat nvfp4_four_over_six`, or a custom recipe whose `algorithm` block is `method: mse` with amax multipliers `[1.0, 1.5]` (`step_size: 0.5`, `fp8_scale_sweep: false`) and `four_over_six: true` weight quantizers — the flag alone with `method: max` is plain abs-max, not 4/6. Scope recipes (for example experts-only) compose with 4/6 the same way as with the standard recipe; 4/6 changes only how weight block scales are chosen. The 4/6 weight-side sweep is calibration-data-independent, so a 4/6 conversion needs no calibration forward pass for weight scales.
 
 ## Resource Preflight
 
