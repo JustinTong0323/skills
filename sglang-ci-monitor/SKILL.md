@@ -19,6 +19,7 @@ Pre-approved (just do them, with one sentence of narration) — **on any sgl-pro
 - All read-only `gh` queries (`gh pr view`, `gh api .../runs|jobs|annotations|logs`).
 - Posting slash commands: `/rerun-failed-ci`, `/tag-and-rerun-ci`, `/rerun-test`, `/rerun-group`, `/tag-run-ci-label`. Adding the `run-ci-extra` label to opt the PR into `pr-test-extra.yml` coverage (or `bypass-fastfail` / `bypass-maintenance` when the diagnostic situation warrants it — see §3).
 - `gh run cancel` as the precursor to a rerun.
+- `gh pr update-branch <PR> --repo sgl-project/sglang` (merge upstream `main` into the PR head) when a confirmed real failure is a **base-branch error** — it reproduces on `main` independently of the PR — **and** `main` already carries the fix (Case F). Update the branch, then let CI refire and keep monitoring. This is a branch mutation the user has pre-authorized for this exact situation only; any other branch mutation still needs explicit approval.
 - `CronCreate` for polling.
 
 Do **not** post `/rerun-stage` — it's deprecated (PR #25322). The handler now replies with a `-1` reaction and a deprecation comment, and does nothing else; posting it costs the user a notification for no result.
@@ -32,14 +33,25 @@ Do **not** pause to ask "PR isn't yours, ok to proceed?" — the user has explic
 
 ## 1. Start the flow
 
-### Scope: NVIDIA only
+### Scope: `base-*` jobs only, plus `extra-*` when opted in
 
-Only monitor NVIDIA CI. **Filter out AMD jobs entirely** — anything matching `*-amd*` is out of scope. Examples to filter: `stage-{a,b,c}-test-*-amd*` (AMD still uses the old `stage-*` prefix — only the NVIDIA workflow was renamed to `base-*`), `sgl-kernel-unit-test*-amd`, `multimodal-gen-test-*-amd*`, the `PR Test (AMD)` and `PR Test ROCm 7.2 (AMD)` workflows.
+Only monitor jobs from the two pr-test workflows:
 
-- When pulling the rollup, exclude AMD jobs before splitting failures into root vs. cascade.
-- Don't report AMD failures, don't diagnose them, don't rerun them.
-- Cron polling considers CI "terminal" when every **non-AMD** check is terminal — ignore AMD pending state.
-- AMD has no slash-command rerun — its stage-level dispatch lives only in the Actions UI (`PR Test (AMD)` → *Run workflow* → pick a stage). The deprecated `/rerun-stage` was NVIDIA-only and doesn't apply to AMD either.
+- **`base-*` jobs** (`pr-test.yml`) — always in scope.
+- **`extra-*` jobs** (`pr-test-extra.yml`) — in scope **only when the PR carries the `run-ci-extra` label**. Without the label, ignore extra CI entirely; its `:warning: Not enabled` state is intentional, not a failure.
+
+**Everything else is out of scope** — don't report it, don't diagnose it, don't count it for terminal-state decisions:
+
+- All AMD jobs (`*-amd*`, `stage-{a,b,c}-test-*-amd*`, `PR Test (AMD)` / `PR Test ROCm 7.2 (AMD)` workflows).
+- Sibling NVIDIA workflows: `_pr-test-sgl-kernel-build.yml` (`Build Wheel*`), jit-kernel, multimodal-gen, and any other non-pr-test workflow.
+- Gates and meta checks (`pr-gate`, `pr-states`, etc.) — read them only to know whether base CI fired, never as signal themselves.
+
+Two exceptions you still must read (not monitor), because they block in-scope jobs:
+
+- **`lint`** — a red `lint.yml` fast-fails every base job (Case B). Check it in the rollup before blaming pr-test, but don't track it beyond that.
+- **`run-ci` label / pr-gate** — determines whether base CI fired at all (Case A).
+
+Cron polling considers CI "terminal" when every **in-scope** check (`base-*`, plus `extra-*` if the label is present) is terminal — ignore pending state everywhere else. `/rerun-failed-ci` still sweeps out-of-scope sibling workflows on the same SHA as a side effect; that's fine, just don't report on them.
 
 ### Resolve the PR
 
@@ -160,13 +172,26 @@ Search logs for `FAILED:` to locate the test file and traceback.
 
 ### Case E: only victims, no root in the current run
 
-The root lives in a sibling workflow — common candidates: `Build Wheel` from `_pr-test-sgl-kernel-build.yml`, JIT-kernel / multimodal-gen test workflows, or `pr-test-extra.yml` when extra CI failed. `rerun_failed_jobs` is scoped to a single run, so the failure won't be retried by `/rerun-failed-ci` unless you look at the right run:
+The root lives in a sibling workflow — common candidates: `Build Wheel` from `_pr-test-sgl-kernel-build.yml`, JIT-kernel / multimodal-gen test workflows, or `pr-test-extra.yml` when extra CI failed. These sibling workflows are **out of scope** (see §1) — don't diagnose them. Just post `/rerun-failed-ci`: the handler iterates every workflow run on the head SHA with conclusion `failure` or `skipped`, so the sibling failure is retried without you reading its logs. Mention it in one line ("root is in an out-of-scope workflow, rerun covers it") and move on.
+
+### Case F: real failure is a base-branch error, already fixed on `main`
+
+Symptom: a confirmed real failure (Case D) that is **not caused by the PR** — the same test fails on `main` (or on other unrelated PRs) at a commit the PR's merge-base already contains. Rerunning just reproduces it; the fix is to pick up the upstream fix.
+
+Confirm **both** halves before acting:
+
+1. **It fails on `main` independently of the PR.** Evidence: the same test red in a recent `main`-branch run (`gh run list --workflow=pr-test.yml --branch main --repo sgl-project/sglang --limit 10`), or the failure is in code the PR doesn't touch and matches a known main breakage. A failure in code the PR modifies is the PR's problem — stop and report instead (code changes are not autonomous).
+2. **`main` is already fixed.** Evidence: the failing test is green in `main` runs newer than the breakage, or a fix commit/PR landed on `main` touching the failing test area (`gh api repos/sgl-project/sglang/commits?path=<test-file>&sha=main --jq '.[].commit.message' | head`).
+
+Only when both hold:
 
 ```bash
-gh run list --branch <head> --limit 5 --repo sgl-project/sglang
+gh pr update-branch <PR> --repo sgl-project/sglang
 ```
 
-Note that `/rerun-failed-ci` iterates every workflow run on the head SHA with conclusion `failure` or `skipped` (not just `pr-test.yml`), so a failed sibling workflow IS picked up — but you still need to look at its run to read the actual log. Diagnose the parent run's failure directly.
+This merges upstream `main` into the PR head (may fail on forks without maintainer-edits enabled — if so, report that and stop; don't force-push workarounds). The push refires base CI on the new head SHA; if it doesn't refire within a few minutes, post `/rerun-failed-ci` (or `/tag-and-rerun-ci` if the label is also missing). Then open/keep the polling cron against the new head.
+
+If the failure reproduces on `main` but `main` is **not** yet fixed, don't update-branch (it changes nothing). Report it as an upstream breakage, and rerun only after a fix lands.
 
 ### Exit code quick reference (for Case D log-reading)
 
@@ -209,7 +234,8 @@ Only the first line of the comment is parsed. Handler: `scripts/ci/utils/slash_c
 
 1. No `run-ci` label (Case A) — `/tag-and-rerun-ci`.
 2. Lint red (Case B) — fix lint first; reruns are wasted until lint is green.
-3. Everything else — `/rerun-failed-ci`. It already handles `sgl-kernel/` correctly (full rerun if any `Build Wheel*` check-run isn't `success`, partial otherwise) and covers sibling workflows on the same SHA, so you don't need to pre-upgrade to `/tag-and-rerun-ci` just because the PR touches kernel code.
+3. Real failure is a base-branch error already fixed on `main` (Case F) — `gh pr update-branch`, then monitor the refired run. Rerunning the old head just reproduces the breakage.
+4. Everything else — `/rerun-failed-ci`. It already handles `sgl-kernel/` correctly (full rerun if any `Build Wheel*` check-run isn't `success`, partial otherwise) and covers sibling workflows on the same SHA, so you don't need to pre-upgrade to `/tag-and-rerun-ci` just because the PR touches kernel code.
 
 `/rerun-test` and `/rerun-group` are **off the tree** — they're investigation tools that dispatch the separate `Rerun Test` workflow and don't update the PR's pr-test checks. The original red stays red. Run them in parallel with a tree action when you want independent flake evidence or want to confirm a single suspected file before paying for a full rerun.
 
@@ -263,7 +289,7 @@ gh api "repos/sgl-project/sglang/actions/runs?event=issue_comment&per_page=3" \
 After confirming the rerun fired, **open a `CronCreate` poll right away** at the default 30 min cadence to babysit to terminal. Do **not** ask "want me to open a cron?" — the user already authorized this when they invoked the skill. Same applies any time you've left CI in a pending state and the user implicitly wants completion.
 
 ```
-CronCreate(schedule: "*/30 * * * *", prompt: "Check CI for PR <N> on sgl-project/sglang. Report job-level deltas since last tick. Then apply the adaptive cadence rules in the sglang-ci-monitor skill (§4) — if the new cadence differs from the current one, CronDelete this trigger and CronCreate a replacement at the new cadence. When every rollup check is terminal or the PR is closed, call CronDelete with this trigger's id and stop.")
+CronCreate(schedule: "*/30 * * * *", prompt: "Check CI for PR <N> on sgl-project/sglang. Report job-level deltas since last tick, scoped to base-* jobs (and extra-* only if the run-ci-extra label is present). Then apply the adaptive cadence rules in the sglang-ci-monitor skill (§4) — if the new cadence differs from the current one, CronDelete this trigger and CronCreate a replacement at the new cadence. When every in-scope check is terminal or the PR is closed, call CronDelete with this trigger's id and stop.")
 ```
 
 The prompt offloads cadence decisions to the rules in §4 so the cron body stays short.
@@ -288,7 +314,7 @@ Prompt cache has a 5-minute TTL. Polling every few minutes burns cache misses re
   ```
 - **CI of ~30 min or more**: `CronCreate` every **30 min by default**, with a prompt that (a) re-pulls the rollup, (b) reports only changed/terminal states, (c) applies the adaptive cadence rules below to pick the next interval, and (d) calls `CronDelete` on its own trigger id when all checks are terminal or the PR is closed.
   ```
-  CronCreate(schedule: "*/30 * * * *", prompt: "Check CI for PR N on sgl-project/sglang. Report job-level deltas since last tick. Then apply the adaptive cadence rules in the sglang-ci-monitor skill (§4) — if the new cadence differs from the current one, CronDelete this trigger and CronCreate a replacement at the new cadence. When every rollup check is terminal or the PR is closed, call CronDelete with this trigger's id and stop.")
+  CronCreate(schedule: "*/30 * * * *", prompt: "Check CI for PR N on sgl-project/sglang. Report job-level deltas since last tick, scoped to base-* jobs (and extra-* only if the run-ci-extra label is present). Then apply the adaptive cadence rules in the sglang-ci-monitor skill (§4) — if the new cadence differs from the current one, CronDelete this trigger and CronCreate a replacement at the new cadence. When every in-scope check is terminal or the PR is closed, call CronDelete with this trigger's id and stop.")
   ```
 - **Never**: backgrounded shell polling (`while true; do ...; sleep 60; done`), `sleep 300 && tail`, or any pattern that keeps a shell alive just to wait. The harness rejects long leading sleeps, and even when it doesn't, the cost/cache math is wrong.
 
@@ -300,7 +326,7 @@ Rules (apply the **first** match, then stop):
 
 | Signal observed this tick | Next cadence |
 |---|---|
-| Every non-AMD check is terminal **or** PR closed | `CronDelete` this trigger and stop. |
+| Every in-scope (`base-*`, plus `extra-*` if `run-ci-extra` is present) check is terminal **or** PR closed | `CronDelete` this trigger and stop. |
 | ≤3 non-terminal jobs left **and** each has been running ≤ its typical wall time | **15 min** — catch terminal-state quickly so the user gets a final report fast. |
 | Steady progress: ≥1 job flipped to terminal since last tick, queue still draining | keep **30 min**. |
 | No state changes for 2 consecutive ticks, but jobs are still actively running (not stuck queued) | extend to **45 min**. |
@@ -325,6 +351,8 @@ Keep the prompt body identical across replacements so subsequent ticks keep appl
 - Don't post `/rerun-stage` — it's deprecated (PR #25322). The handler replies with `-1` and a comment but does nothing useful. Use `/rerun-failed-ci`, `/rerun-test <files>`, or `/rerun-group <group>` instead.
 - Don't use the old `stage-{a,b,c}-test-*` names when discussing NVIDIA CI — they're now `base-{a,b,c}-test-*`. (AMD CI is the exception: AMD jobs still use the `stage-*` prefix.)
 - Don't confuse `pr-test.yml` (base CI) with `pr-test-extra.yml` (extra CI). They are separate workflows with separate run ids, separate label gates, and separate stages (`base-a/b/c` vs `extra-a/b`).
+- Don't report, diagnose, or rerun anything outside the in-scope set — `base-*` always, `extra-*` only with `run-ci-extra`. AMD jobs, `Build Wheel*`, jit-kernel, multimodal-gen, and gates are noise for monitoring purposes (lint is read only as a fast-fail source).
+- Don't rerun a confirmed base-branch failure that `main` already fixed — `gh pr update-branch` first (Case F), then monitor the new head. Conversely, don't update-branch for any reason other than Case F without explicit approval.
 - Never background-shell-poll for CI; use `CronCreate`.
 - Never call exit 255 "runner crash" without reading the log.
 - Never investigate fast-fail victims individually — find the root. (Exception: PR carries `bypass-fastfail`, in which case there are no victims — every FAILURE is real.)
