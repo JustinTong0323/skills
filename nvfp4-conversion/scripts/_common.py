@@ -1,7 +1,26 @@
+import fnmatch
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
+
+SAFETENSORS_DTYPE_BYTES = {
+    "BOOL": 1,
+    "U8": 1,
+    "I8": 1,
+    "F8_E5M2": 1,
+    "F8_E4M3": 1,
+    "I16": 2,
+    "U16": 2,
+    "F16": 2,
+    "BF16": 2,
+    "I32": 4,
+    "U32": 4,
+    "F32": 4,
+    "F64": 8,
+    "I64": 8,
+    "U64": 8,
+}
 
 
 def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -39,6 +58,50 @@ def sha256_file(path: Path, chunk_size: int = 16 << 20) -> str:
     return digest.hexdigest()
 
 
+def tensor_bytes(shape: list[int], dtype: str) -> int:
+    if dtype not in SAFETENSORS_DTYPE_BYTES:
+        raise ValueError(f"unknown safetensors dtype: {dtype}")
+    count = 1
+    for dimension in shape:
+        count *= dimension
+    return count * SAFETENSORS_DTYPE_BYTES[dtype]
+
+
+def config_value(config: dict, key: str):
+    root = config.get(key)
+    text_config = config.get("text_config") or {}
+    if not isinstance(text_config, dict):
+        raise ValueError("text_config must be an object when present")
+    nested = text_config.get(key)
+    if root is not None and nested is not None and root != nested:
+        raise ValueError(f"conflicting root/text_config value for {key}")
+    return nested if nested is not None else root
+
+
+def mtp_layer_prefix(config: dict) -> str | None:
+    # HF GLM/DeepSeek name the nextn layer model.layers.<num_hidden_layers>.* with no "mtp" substring
+    layers = config_value(config, "num_hidden_layers")
+    if isinstance(layers, int) and config_value(config, "num_nextn_predict_layers"):
+        return f"model.layers.{layers}."
+    return None
+
+
+def is_mtp_key(key: str, mtp_prefix: str | None) -> bool:
+    return key.startswith("mtp.") or ".mtp." in key or bool(mtp_prefix and key.startswith(mtp_prefix))
+
+
+def module_matches(base: str, pattern: str) -> bool:
+    # Mirrors the SGLang ModelOpt loader: a glob pattern excludes a module when it
+    # matches the whole module path or any single dotted segment of it.
+    if fnmatch.fnmatchcase(base, pattern):
+        return True
+    return any(fnmatch.fnmatchcase(part, pattern) for part in base.split("."))
+
+
+def module_excluded(base: str, patterns: list[str]) -> bool:
+    return any(module_matches(base, pattern) for pattern in patterns)
+
+
 def require_safetensors():
     try:
         from safetensors import safe_open
@@ -47,18 +110,31 @@ def require_safetensors():
     return safe_open
 
 
+def ignored_checkpoint_path(relative: PurePosixPath) -> bool:
+    parts = relative.parts
+    if ".git" in parts[:-1]:
+        return True
+    return any(parts[index : index + 2] == (".cache", "huggingface") for index in range(len(parts) - 2))
+
+
+def checkpoint_files(root: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in root.rglob("*")
+        if path.is_file() and not ignored_checkpoint_path(PurePosixPath(path.relative_to(root).as_posix()))
+    )
+
+
 def checkpoint_layout(root: Path) -> dict[str, Any]:
     safe_open = require_safetensors()
     if not root.is_dir():
         raise ValueError(f"checkpoint directory does not exist: {root}")
     incomplete_markers = (".tmp", ".partial", ".incomplete")
-    incomplete_files = sorted(
+    incomplete_files = [
         path.relative_to(root).as_posix()
-        for path in root.rglob("*")
-        if path.is_file()
-        and ".cache/huggingface/" not in path.as_posix()
-        and any(path.name.endswith(marker) or f"{marker}." in path.name for marker in incomplete_markers)
-    )
+        for path in checkpoint_files(root)
+        if any(path.name.endswith(marker) or f"{marker}." in path.name for marker in incomplete_markers)
+    ]
     if incomplete_files:
         raise ValueError(f"checkpoint contains incomplete files: {incomplete_files}")
     index_path = root / "model.safetensors.index.json"
@@ -101,7 +177,7 @@ def checkpoint_layout(root: Path) -> dict[str, Any]:
                 f"index/file mismatch: missing={sorted(physical_names - indexed_files)} "
                 f"extra={sorted(indexed_files - physical_names)}"
             )
-        indexed_payload_bytes = index.get("metadata", {}).get("total_size")
+        indexed_payload_bytes = (index.get("metadata") or {}).get("total_size")
     else:
         if len(physical_files) != 1:
             raise ValueError("multiple safetensors files require model.safetensors.index.json")
@@ -176,21 +252,14 @@ def scan_positive_finite(
 def directory_inventory(root: Path) -> dict[str, Any]:
     if not root.is_dir():
         raise ValueError(f"inventory root does not exist: {root}")
-    files = []
-    for path in sorted(
-        item
-        for item in root.rglob("*")
-        if item.is_file()
-        and ".cache/huggingface/" not in item.as_posix()
-        and "/.git/" not in item.as_posix()
-    ):
-        files.append(
-            {
-                "name": path.relative_to(root).as_posix(),
-                "sha256": sha256_file(path),
-                "size": path.stat().st_size,
-            }
-        )
+    files = [
+        {
+            "name": path.relative_to(root).as_posix(),
+            "sha256": sha256_file(path),
+            "size": path.stat().st_size,
+        }
+        for path in checkpoint_files(root)
+    ]
     return {
         "file_count": len(files),
         "files": files,

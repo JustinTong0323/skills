@@ -91,7 +91,7 @@ Adaptive block scaling ("Four Over Six", arXiv:2512.02010) quantizes each weight
 - **Harmful (300B-class hybrid MoE, unfused experts, 36,423 NVFP4 bases, ModelOpt 0.46.0, official-FP8-scope W4A4)**: true 4/6 AIME26 88.85% vs 92.45% abs-max (1,920 question×repeat×seed pairs, delta -3.59pt, 95% CI [-5.10, -1.93], McNemar p<0.0001), +14% median and +22% mean thinking tokens (p90 tail 95,570 vs 54,199), stop rate 92.0% vs 95.2%. GSM8K a wash on accuracy (-0.13pt) but +12% mean thinking.
 - **Non-inferior (745B-class GLM MoE, fused experts, MLA+MTP, 57,600 NVFP4 bases, calib 64)**: paired vs std-max on Terminal-Bench 2.1 (70/78 vs 70/78 same-task, flips 5:5, McNemar p=1.0), GSM8K +0.53pt (97.95 vs 97.42), AIME26 -0.84pt inside SEM ±1.67 (93.33 vs 94.17, n=8 protocol), thinking length per-task symmetric. Scale audit across 225M blocks explains why: the MSE sweep never selected a scale below the abs-max one (0.0% of blocks), matching abs-max on 54.8% and adding 1.5x headroom on 45% — on this family's weight distributions the sweep is headroom-only, so 4/6 degenerates to "abs-max plus safety margin" and the Flash-style harm mechanism (harder clipping) never activates.
 
-An earlier arm mislabeled as 4/6 (abs-max with 256 normalization) was incidentally the most stable — do not confuse the two. Do not claim 4/6 benefit or harm by analogy across families; require a per-family paired A/B under the protocol in [validation-and-release.md](validation-and-release.md) showing non-inferiority on accuracy and thinking-length, and when available inspect the sweep's chosen-multiplier distribution (any mass below the abs-max scale is where the risk lives).
+Abs-max with 256 normalization (the `four_over_six` flag without the MSE sweep) is a third, distinct arm; label it as such in any A/B. Do not claim 4/6 benefit or harm by analogy across families; require a per-family paired A/B under the protocol in [validation-and-release.md](validation-and-release.md) showing non-inferiority on accuracy and thinking-length, and when available inspect the sweep's chosen-multiplier distribution (any mass below the abs-max scale is where the risk lives).
 
 Model Optimizer ships the official implementation as `mtq.NVFP4_FOUR_OVER_SIX_CFG`, usable through `mtq.quantize` with HF or Megatron export. The config exists on main since before the reference commits above; release 0.46.0 is the first tag containing it. Sharp edges:
 
@@ -129,38 +129,34 @@ The routed path's layer/expert calibration is defined separately because it cann
 
 ## Conversion Manifest
 
-Canonicalize deterministic JSON and hash it before expensive work. Include at least:
+Canonicalize deterministic JSON and hash it before expensive work. `scripts/build_manifest.py` emits this shape; `manifest_sha256` is the SHA256 of the canonical JSON of every other field:
 
 ```json
 {
-  "source": {
-    "repository": "<repo-or-local-id>",
-    "revision": "<immutable-revision>",
-    "files": [{"name": "<path>", "size": 0, "sha256": "<sha256>"}]
-  },
-  "architecture": {
-    "model_class": "<class>",
-    "text_config_path": "<root-or-path>",
-    "backbone_prefix": "<prefix>",
-    "normalized_layout": "<object>"
-  },
-  "conversion_path": "<whole_model-or-routed_expert_streaming>",
-  "path_decision": "<normalized-object>",
-  "modelopt_commit": "<commit>",
-  "environment_sha256": "<sha256>",
-  "conversion_artifacts": [{"name": "<path>", "sha256": "<sha256>"}],
+  "architecture": "<preflight report: decision, decision_reason, layout, MTP and routed findings>",
   "arguments": "<normalized-object>",
-  "recipe": "<name-or-path>",
-  "recipe_sha256": "<sha256>",
-  "precision_contract": "<normalized-object>",
   "calibration": "<normalized-object>",
+  "conversion_artifacts": [{"name": "<path>", "sha256": "<sha256>", "size": 0}],
+  "conversion_path": "<whole_model-or-routed_expert_streaming>",
+  "environment": "<normalized-object>",
+  "manifest_sha256": "<sha256>",
+  "modelopt_commit": "<full-commit>",
+  "precision_contract": "<normalized-object>",
+  "recipe": {"name": "<name-or-path>", "path": "<resolved-file-if-any>", "sha256": "<sha256-if-file>"},
+  "source": {
+    "inventory": {"file_count": 0, "files": [{"name": "<path>", "sha256": "<sha256>", "size": 0}], "total_file_bytes": 0},
+    "repository": "<repo-or-local-id>",
+    "revision": "<immutable-revision>"
+  },
   "topology": "<normalized-object>"
 }
 ```
 
+The path decision and its reason live in `architecture`; the environment is embedded whole rather than hashed separately. A recipe named by preset rather than by file records no `path`/`sha256`; the pinned `modelopt_commit` then identifies its body.
+
 Store the manifest under a generation directory keyed by the full digest. Once conversion output exists, never edit it. Any output-affecting change creates a new generation.
 
-`scripts/build_manifest.py` resolves the Model Optimizer checkout to an exact Git commit, hashes recipe and runner artifacts, rejects a non-executable preflight decision, and emits canonical manifest identity from normalized JSON inputs.
+`scripts/build_manifest.py` resolves the Model Optimizer checkout to an exact Git commit and requires it clean, hashes recipe and runner artifacts, rejects a non-executable preflight decision, and emits canonical manifest identity from normalized JSON inputs.
 
 ## Output Manifest
 

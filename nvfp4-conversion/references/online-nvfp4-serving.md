@@ -23,7 +23,7 @@ Prefer the online path over running this skill's calibration pipeline when all a
 
 Offline Model Optimizer conversion remains necessary for publishable pre-quantized checkpoints, unsupported online backends, W4A16 or dense-linear quantization scopes, and weight-side recipes that must be baked in (for example four_over_six block selection, though a runtime `FLASHINFER_NVFP4_4OVER6` hook exists).
 
-## Why It Avoids Our Calibration Failure Modes
+## Why It Avoids The Offline Calibration Failure Modes
 
 Every stage of the offline pipeline that has produced a silent-garbage incident is absent from the online path:
 
@@ -50,4 +50,4 @@ Before treating the online path as a replacement for a given model family, A/B i
 - Arm A: calibrated Model Optimizer checkpoint served with `modelopt_fp4`.
 - Arm B: the BF16/FP8 source checkpoint served with `--quantization nvfp4_online`.
 
-Also use `SGLANG_FP4_IGNORED_LAYERS` to test sensitive-layer hypotheses at serve time instead of reconverting; it subsumes the queued per-layer |Δh|/|h| high-precision reconversion experiment.
+Also use `SGLANG_FP4_IGNORED_LAYERS` to test sensitive-layer hypotheses at serve time instead of reconverting; it replaces per-layer |Δh|/|h| high-precision reconversion experiments.

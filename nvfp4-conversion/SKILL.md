@@ -19,7 +19,7 @@ Do not select a path from a model name. Inspect the source config, safetensors m
 Obtain or discover:
 
 - Read-only BF16 or FP16 Hugging Face source checkpoint at an immutable revision, with `config.json` and either one safetensors file or a complete safetensors index.
-- Requested Model Optimizer revision, resolved once to an exact commit. The known-good reference is `87c9f8cf83021957d1a1a575c90c9a4eaaf7ef0c`; it is evidence, not a permanent default.
+- Requested Model Optimizer revision, resolved once to an exact commit. The known-good reference commits are listed in [conversion-contract.md](references/conversion-contract.md); they are evidence, not permanent defaults.
 - An official or previously qualified Model Optimizer recipe compatible with the exact architecture and desired precision scope.
 - Calibration dataset, revision, split, sample count, sequence length, batch size, seed, and algorithm.
 - Target SGLang revision, hardware topology, and enough local and durable storage for source, staging, final output, and qualification artifacts.
@@ -58,6 +58,8 @@ python scripts/inventory.py "$SOURCE" --output source-inventory.json
 
 For a routed run, also pass the exact expected layer IDs, for example `--expected-routed-layers 0,2,4`. Preflight requires the discovered fused layer set to match exactly, so non-contiguous hybrid layouts remain supported without accepting an incomplete checkpoint.
 
+With `--require-decision`, a `needs_evidence` or `unsupported` result is printed to stdout and exits 2 without writing `--output`; rerun with the missing evidence flags to write the report.
+
 Build the immutable conversion manifest after writing normalized JSON files for calibration, environment, arguments, precision contract, and topology:
 
 ```bash
@@ -93,7 +95,7 @@ printf '%s\n' "$HF_TOKEN" | python scripts/verify_hf.py \
   --output hf-verification.json
 ```
 
-If routed assembly emits precision metadata separately, pass its normalized `quantized_layers` contract with `--precision-contract`. Never weaken a failed script check without first resolving the mismatch.
+For an official single-algorithm export (`quant_algo` `NVFP4`, `W4A16_NVFP4`, or `FP8` with `exclude_modules` and no `quantized_layers` map), the audit derives the quantized set from the exclusion patterns and the source keys. It fails when an excluded module was quantized, when a linear-shaped module is neither excluded, protected, nor quantized, or when `config.json` `ignore` differs from `hf_quant_config.json` `exclude_modules`. `MIXED_PRECISION` exports carry `quantized_layers`; routed assembly must pass its normalized `quantized_layers` contract with `--precision-contract`. Never weaken a failed script check without first resolving the mismatch.
 
 ## Workflow
 
@@ -107,7 +109,7 @@ Inspect config and weight metadata without loading all tensors. Resolve:
 - Flat or nested text-config path and backbone key prefix.
 - Layer types, tensor key set, source shard set, dtypes, dimensions, MTP presence, and expert layout.
 - Model Optimizer architecture registration and exact recipe semantics.
-- Expected output precision by module: W4A16 NVFP4, FP8, BF16/FP16, excluded, and KV-cache metadata.
+- Expected output precision by module: W4A4 `NVFP4`, `W4A16_NVFP4`, FP8, BF16/FP16, excluded, and KV-cache metadata.
 
 Create an immutable conversion manifest before expensive work. Any input that can change output bytes belongs in its identity.
 

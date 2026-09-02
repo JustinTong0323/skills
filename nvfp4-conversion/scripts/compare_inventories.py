@@ -17,13 +17,17 @@ def main() -> None:
     if left != right:
         left_files = {item["name"]: item for item in left.get("files", [])}
         right_files = {item["name"]: item for item in right.get("files", [])}
-        changed = sorted(name for name in left_files.keys() & right_files.keys() if left_files[name] != right_files[name])
+        shared = left_files.keys() & right_files.keys()
+        changed = sorted(name for name in shared if left_files[name] != right_files[name])
         raise SystemExit(
             "inventory mismatch: "
             f"left_only={sorted(left_files.keys() - right_files.keys())}, "
             f"right_only={sorted(right_files.keys() - left_files.keys())}, changed={changed}"
         )
-    write_json(args.output, {"identical": True, "file_count": left["file_count"], "total_file_bytes": left["total_file_bytes"]})
+    write_json(
+        args.output,
+        {"identical": True, "file_count": left["file_count"], "total_file_bytes": left["total_file_bytes"]},
+    )
 
 
 if __name__ == "__main__":

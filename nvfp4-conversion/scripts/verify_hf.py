@@ -16,7 +16,9 @@ def lfs_sha256(value) -> str | None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Verify a Hugging Face model revision against a local release inventory.")
+    parser = argparse.ArgumentParser(
+        description="Verify a Hugging Face model revision against a local release inventory."
+    )
     parser.add_argument("repo_id")
     parser.add_argument("inventory", type=Path)
     parser.add_argument("--revision")

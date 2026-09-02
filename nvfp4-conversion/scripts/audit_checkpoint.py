@@ -5,33 +5,87 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from _common import checkpoint_layout, compare_tensor_content, load_json, scan_positive_finite, write_json
+from _common import (
+    checkpoint_layout,
+    compare_tensor_content,
+    is_mtp_key,
+    load_json,
+    module_excluded,
+    mtp_layer_prefix,
+    scan_positive_finite,
+    tensor_bytes,
+    write_json,
+)
 
 NVFP4_GROUP_SIZE = 16
 PROTECTED_BASE = re.compile(r"(^|\.)(mtp|gate|router)(\.|$)")
+FUSED_EXPERT_BASE = re.compile(r"\.mlp\.experts\.(gate_up_proj|down_proj)$")
+SINGLE_ALGORITHMS = ("NVFP4", "W4A16_NVFP4", "FP8")
 
 
-def mtp_layer_prefix(config: dict) -> str | None:
-    # HF GLM names the nextn layer model.layers.<num_hidden_layers>.* with no "mtp" substring
-    layers = config.get("num_hidden_layers")
-    if isinstance(layers, int) and config.get("num_nextn_predict_layers"):
-        return f"model.layers.{layers}."
-    return None
-
-
-def quantized_layers(output: Path, contract: Path | None) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+def quantization_metadata(output: Path, contract: Path | None, output_config: dict) -> tuple[dict[str, Any], str]:
     if contract:
         data = load_json(contract)
-    else:
-        path = output / "hf_quant_config.json"
-        if not path.exists():
-            raise ValueError("hf_quant_config.json or --precision-contract is required")
+        return data.get("quantization", data), str(contract)
+    path = output / "hf_quant_config.json"
+    if path.exists():
         data = load_json(path)
-    quantization = data.get("quantization", data)
-    layers = quantization.get("quantized_layers")
-    if not isinstance(layers, dict) or not layers:
-        raise ValueError("a non-empty quantized_layers map is required; routed assembly must provide --precision-contract")
-    return layers, quantization
+        return data.get("quantization", data), path.name
+    config_quantization = output_config.get("quantization_config")
+    if isinstance(config_quantization, dict):
+        return config_quantization, "config.json"
+    raise ValueError("hf_quant_config.json, config.json quantization_config, or --precision-contract is required")
+
+
+def exclusion_patterns(quantization: dict[str, Any]) -> list[str]:
+    patterns = quantization.get("exclude_modules")
+    if patterns is None:
+        patterns = quantization.get("ignore")
+    if patterns is None:
+        return []
+    if not isinstance(patterns, list) or not all(isinstance(item, str) for item in patterns):
+        raise ValueError("exclude_modules/ignore must be a list of module patterns")
+    return patterns
+
+
+def derive_quantized_layers(
+    quantization: dict[str, Any],
+    source_meta: dict[str, dict[str, Any]],
+    output_meta: dict[str, dict[str, Any]],
+    exclusions: list[str],
+) -> dict[str, dict[str, Any]]:
+    algorithm = quantization.get("quant_algo")
+    if algorithm not in SINGLE_ALGORITHMS:
+        raise ValueError(
+            f"quant_algo {algorithm!r} needs an explicit quantized_layers map; MIXED_PRECISION exports carry one "
+            "and routed assembly must provide --precision-contract"
+        )
+    spec: dict[str, Any] = {"quant_algo": algorithm}
+    if algorithm != "FP8":
+        spec["group_size"] = quantization.get("group_size", NVFP4_GROUP_SIZE)
+    layers = {}
+    unquantized = []
+    for key, meta in sorted(source_meta.items()):
+        if not key.endswith(".weight"):
+            continue
+        base = key[: -len(".weight")]
+        if base + ".weight_scale" in output_meta:
+            if module_excluded(base, exclusions):
+                raise ValueError(f"excluded module was quantized: {base}")
+            layers[base] = dict(spec)
+            continue
+        rank = len(meta["shape"])
+        linear_shaped = rank == 2 or (rank == 3 and FUSED_EXPERT_BASE.search(base))
+        if linear_shaped and not module_excluded(base, exclusions) and not PROTECTED_BASE.search(base):
+            unquantized.append(base)
+    if unquantized:
+        raise ValueError(
+            "linear-shaped modules are neither excluded nor quantized; fix the export or pass an explicit "
+            f"--precision-contract: {unquantized[:10]}"
+        )
+    if not layers:
+        raise ValueError("no quantized module found in the output checkpoint")
+    return layers
 
 
 def expected_forms(algorithm: str) -> dict[str, str]:
@@ -70,7 +124,9 @@ def validate_shape(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Audit a unified-HF ModelOpt NVFP4 checkpoint against its floating-point source.")
+    parser = argparse.ArgumentParser(
+        description="Audit a unified-HF ModelOpt NVFP4 checkpoint against its floating-point source."
+    )
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output-checkpoint", type=Path, required=True)
     parser.add_argument("--precision-contract", type=Path)
@@ -85,10 +141,27 @@ def main() -> None:
     output_config = load_json(args.output_checkpoint / "config.json")
     source = checkpoint_layout(args.source)
     output = checkpoint_layout(args.output_checkpoint)
-    layer_map, quantization = quantized_layers(args.output_checkpoint, args.precision_contract)
+    source_meta = source["tensor_metadata"]
+    output_meta = output["tensor_metadata"]
     config_quantization = output_config.get("quantization_config")
     if not isinstance(config_quantization, dict):
         raise ValueError("output config.json has no quantization_config object")
+    quantization, contract_origin = quantization_metadata(
+        args.output_checkpoint, args.precision_contract, output_config
+    )
+    exclusions = exclusion_patterns(quantization)
+    config_exclusions = exclusion_patterns(config_quantization)
+    if contract_origin != "config.json" and set(config_exclusions) != set(exclusions):
+        raise ValueError(
+            f"config.json quantization_config exclusions disagree with {contract_origin}; "
+            "SGLang applies the config.json set"
+        )
+    layer_map = quantization.get("quantized_layers")
+    derived = layer_map is None
+    if derived:
+        layer_map = derive_quantized_layers(quantization, source_meta, output_meta, exclusions)
+    elif not isinstance(layer_map, dict) or not layer_map:
+        raise ValueError("quantized_layers must be a non-empty object when present")
     config_layers = config_quantization.get("quantized_layers")
     if config_layers is not None and config_layers != layer_map:
         raise ValueError("config.json and precision contract disagree on quantized_layers")
@@ -105,11 +178,7 @@ def main() -> None:
     if kv_cache_algorithm == "FP8" and kv_cache_scheme != {"dynamic": False, "num_bits": 8, "type": "float"}:
         raise ValueError("config.json kv_cache_scheme does not represent the FP8 precision contract")
     mtp_prefix = mtp_layer_prefix(source_config)
-    protected = sorted(
-        base
-        for base in layer_map
-        if PROTECTED_BASE.search(base) or (mtp_prefix and base.startswith(mtp_prefix))
-    )
+    protected = sorted(base for base in layer_map if PROTECTED_BASE.search(base) or is_mtp_key(base, mtp_prefix))
     if protected and not args.allow_quantized_protected:
         raise ValueError(
             "protected modules appear in quantized_layers; pass --allow-quantized-protected only with a "
@@ -117,12 +186,10 @@ def main() -> None:
         )
     # Exported attention k/v bmm scales silently corrupt MLA serving in sglang;
     # official NVFP4 checkpoints ship none, so treat their presence as a violation.
-    kv_scale_leaked = sorted(key for key in output["tensor_metadata"] if key.endswith(".k_scale") or key.endswith(".v_scale"))
+    kv_scale_leaked = sorted(key for key in output_meta if key.endswith((".k_scale", ".v_scale")))
     if kv_scale_leaked:
         raise ValueError(f"KV bmm scale tensors must not ship in the checkpoint: {kv_scale_leaked[:10]}")
 
-    source_meta = source["tensor_metadata"]
-    output_meta = output["tensor_metadata"]
     transformed_source_keys = set()
     expected_output_keys = set(source_meta)
     algorithm_counts = Counter()
@@ -161,11 +228,7 @@ def main() -> None:
         )
 
     unchanged_keys = sorted(set(source_meta) - transformed_source_keys)
-    mtp_keys = [
-        key
-        for key in unchanged_keys
-        if key.startswith("mtp.") or ".mtp." in key or (mtp_prefix and key.startswith(mtp_prefix))
-    ]
+    mtp_keys = [key for key in unchanged_keys if is_mtp_key(key, mtp_prefix)]
     unchanged_bytes = 0
     for key in unchanged_keys:
         if output_meta[key] != source_meta[key]:
@@ -178,14 +241,7 @@ def main() -> None:
             key,
             args.rows_per_chunk,
         )
-        element_count = 1
-        for dimension in source_meta[key]["shape"]:
-            element_count *= dimension
-        dtype_size = {"BF16": 2, "F16": 2, "F32": 4, "F64": 8, "I64": 8, "I32": 4, "U8": 1}.get(
-            source_meta[key]["dtype"]
-        )
-        if dtype_size:
-            unchanged_bytes += element_count * dtype_size
+        unchanged_bytes += tensor_bytes(source_meta[key]["shape"], source_meta[key]["dtype"])
 
     scale_count = 0
     scale_minimum = float("inf")
@@ -203,11 +259,14 @@ def main() -> None:
 
     report = {
         "algorithm_base_counts": dict(sorted(algorithm_counts.items())),
+        "exclusion_pattern_count": len(exclusions),
         "kv_cache_quant_algo": kv_cache_algorithm,
         "mtp_tensor_count": len(mtp_keys),
         "output_indexed_payload_bytes": output["indexed_payload_bytes"],
         "output_shard_count": len(output["physical_files"]),
         "output_tensor_count": len(output_meta),
+        "precision_contract_origin": contract_origin,
+        "quantized_layers_derived": derived,
         "quantized_layers_recorded_in_config": config_layers is not None,
         "quantized_protected_bases": protected,
         "scale_max": scale_maximum,

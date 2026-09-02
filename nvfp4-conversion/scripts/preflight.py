@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
 import argparse
 import re
+import sys
 from pathlib import Path
 
-from _common import checkpoint_layout, load_json, write_json
-
+from _common import (
+    checkpoint_layout,
+    config_value,
+    is_mtp_key,
+    load_json,
+    mtp_layer_prefix,
+    write_json,
+)
 
 ROUTED_KEY = re.compile(r"^(.*layers\.)(\d+)(\.mlp\.experts\.)(gate_up_proj|down_proj)\.weight$")
+EXECUTABLE_DECISIONS = {"whole_model", "routed_expert_streaming"}
 
 
 def tri_state(value: str) -> str:
@@ -15,19 +23,10 @@ def tri_state(value: str) -> str:
     return value
 
 
-def config_value(config: dict, key: str):
-    root = config.get(key)
-    text_config = config.get("text_config") or {}
-    if not isinstance(text_config, dict):
-        raise ValueError("text_config must be an object when present")
-    nested = text_config.get(key)
-    if root is not None and nested is not None and root != nested:
-        raise ValueError(f"conflicting root/text_config value for {key}")
-    return nested if nested is not None else root
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Inspect a source checkpoint and select an NVFP4 conversion path from explicit evidence.")
+    parser = argparse.ArgumentParser(
+        description="Inspect a source checkpoint and select an NVFP4 conversion path from explicit evidence."
+    )
     parser.add_argument("checkpoint", type=Path)
     parser.add_argument("--modelopt-supported", type=tri_state, default="unknown")
     parser.add_argument("--whole-model-fit", type=tri_state, default="unknown")
@@ -60,7 +59,9 @@ def main() -> None:
         match = ROUTED_KEY.match(key)
         if match:
             routed.setdefault((match.group(1), int(match.group(2)), match.group(3)), {})[match.group(4)] = item
-    complete_routed = bool(routed) and all(set(projections) == {"gate_up_proj", "down_proj"} for projections in routed.values())
+    complete_routed = bool(routed) and all(
+        set(projections) == {"gate_up_proj", "down_proj"} for projections in routed.values()
+    )
     if complete_routed:
         prefixes = {prefix for prefix, _, _ in routed}
         layers = {layer for _, layer, _ in routed}
@@ -90,7 +91,9 @@ def main() -> None:
         and (args.whole_model_fit == "no" or args.modelopt_supported == "no")
     ):
         decision = "routed_expert_streaming"
-        reason = "whole-model conversion is unavailable and a qualified exporter matches the complete fused routed layout"
+        reason = (
+            "whole-model conversion is unavailable and a qualified exporter matches the complete fused routed layout"
+        )
     elif args.modelopt_supported == "no" and (not routed_compatible or args.routed_exporter_qualified == "no"):
         decision = "unsupported"
         reason = "whole-model support is absent and no qualified compatible routed path is available"
@@ -101,7 +104,9 @@ def main() -> None:
         routed_compatible and args.routed_exporter_qualified == "unknown"
     ):
         decision = "needs_evidence"
-        reason = "Model Optimizer support, memory fit, and any routed exporter qualification must be established explicitly"
+        reason = (
+            "Model Optimizer support, memory fit, and any routed exporter qualification must be established explicitly"
+        )
     else:
         decision = "unsupported"
         reason = "neither a supported fitting whole-model path nor the bounded fused routed layout is available"
@@ -109,7 +114,8 @@ def main() -> None:
     dtype_counts = {}
     for item in metadata.values():
         dtype_counts[item["dtype"]] = dtype_counts.get(item["dtype"], 0) + 1
-    mtp_keys = sorted(key for key in metadata if key.startswith("mtp.") or ".mtp." in key)
+    mtp_prefix = mtp_layer_prefix(config)
+    mtp_keys = sorted(key for key in metadata if is_mtp_key(key, mtp_prefix))
     report = {
         "architecture": config.get("architectures", []),
         "decision": decision,
@@ -118,6 +124,7 @@ def main() -> None:
         "hidden_layers": config_value(config, "num_hidden_layers"),
         "model_type": config.get("model_type"),
         "modelopt_supported": args.modelopt_supported,
+        "mtp_layer_prefix": mtp_prefix,
         "mtp_tensor_count": len(mtp_keys),
         "routed_expert": {
             "compatible": routed_compatible,
@@ -131,9 +138,13 @@ def main() -> None:
         "text_model_type": (config.get("text_config") or {}).get("model_type"),
         "whole_model_fit": args.whole_model_fit,
     }
-    write_json(args.output, report)
-    if args.require_decision and decision in {"needs_evidence", "unsupported"}:
+    if args.require_decision and decision not in EXECUTABLE_DECISIONS:
+        # A non-executable decision is diagnostic output, not evidence: keep --output
+        # untouched so the corrected rerun can write it.
+        write_json(None, report)
+        print(f"preflight decision is {decision}; nothing written to --output", file=sys.stderr)
         raise SystemExit(2)
+    write_json(args.output, report)
 
 
 if __name__ == "__main__":

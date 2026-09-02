@@ -9,7 +9,6 @@ from pathlib import Path
 import torch
 from safetensors.torch import save_file
 
-
 SCRIPTS = Path(__file__).resolve().parents[1]
 
 
@@ -26,8 +25,18 @@ def write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
+def write_checkpoint(root: Path, config: dict, tensors: dict) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    write_json(root / "config.json", config)
+    save_file(tensors, root / "model.safetensors")
+
+
+def git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", "-c", "commit.gpgsign=false", "-C", str(repo), *args], check=True)
+
+
 class ToolTests(unittest.TestCase):
-    def test_inventory_rejects_duplicate_json_keys(self) -> None:
+    def test_preflight_rejects_duplicate_json_keys(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             save_file({"weight": torch.ones(2, dtype=torch.bfloat16)}, root / "model.safetensors")
@@ -49,8 +58,11 @@ class ToolTests(unittest.TestCase):
     def test_dense_single_file_preflight_and_inventory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            write_json(root / "config.json", {"architectures": ["DenseModel"], "model_type": "dense", "num_hidden_layers": 1})
-            save_file({"model.layers.0.mlp.up_proj.weight": torch.ones((2, 4), dtype=torch.bfloat16)}, root / "model.safetensors")
+            write_checkpoint(
+                root,
+                {"architectures": ["DenseModel"], "model_type": "dense", "num_hidden_layers": 1},
+                {"model.layers.0.mlp.up_proj.weight": torch.ones((2, 4), dtype=torch.bfloat16)},
+            )
             preflight = json.loads(
                 run_tool(
                     "preflight.py",
@@ -80,7 +92,9 @@ class ToolTests(unittest.TestCase):
     def test_fused_routed_preflight_requires_complete_layout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            write_json(root / "config.json", {"architectures": ["MoeModel"], "model_type": "moe", "num_hidden_layers": 2})
+            write_json(
+                root / "config.json", {"architectures": ["MoeModel"], "model_type": "moe", "num_hidden_layers": 2}
+            )
             tensors = {}
             for layer in range(2):
                 base = f"model.layers.{layer}.mlp.experts"
@@ -116,7 +130,9 @@ class ToolTests(unittest.TestCase):
     def test_routed_layout_requires_qualified_exporter(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            write_json(root / "config.json", {"architectures": ["MoeModel"], "model_type": "moe", "num_hidden_layers": 1})
+            write_json(
+                root / "config.json", {"architectures": ["MoeModel"], "model_type": "moe", "num_hidden_layers": 1}
+            )
             save_file(
                 {
                     "model.layers.0.mlp.experts.gate_up_proj.weight": torch.ones((4, 8, 4), dtype=torch.bfloat16),
@@ -170,12 +186,12 @@ class ToolTests(unittest.TestCase):
             artifact = root / "runner.py"
             modelopt = root / "modelopt"
             modelopt.mkdir()
-            subprocess.run(["git", "init", "-q", str(modelopt)], check=True)
-            subprocess.run(["git", "-C", str(modelopt), "config", "user.email", "test@example.com"], check=True)
-            subprocess.run(["git", "-C", str(modelopt), "config", "user.name", "Test"], check=True)
+            git(modelopt, "init", "-q")
+            git(modelopt, "config", "user.email", "test@example.com")
+            git(modelopt, "config", "user.name", "Test")
             (modelopt / "recipe.py").write_text("CONFIG = {}\n")
-            subprocess.run(["git", "-C", str(modelopt), "add", "recipe.py"], check=True)
-            subprocess.run(["git", "-C", str(modelopt), "commit", "-q", "-m", "fixture"], check=True)
+            git(modelopt, "add", "recipe.py")
+            git(modelopt, "commit", "-q", "-m", "fixture")
             write_json(preflight, {"decision": "whole_model", "model_type": "dense"})
             write_json(inventory, {"file_count": 0, "files": [], "total_file_bytes": 0})
             write_json(calibration, {"samples": 1, "seed": 1234})
@@ -512,7 +528,9 @@ class ToolTests(unittest.TestCase):
     def test_routed_preflight_requires_bf16(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            write_json(root / "config.json", {"architectures": ["MoeModel"], "model_type": "moe", "num_hidden_layers": 1})
+            write_json(
+                root / "config.json", {"architectures": ["MoeModel"], "model_type": "moe", "num_hidden_layers": 1}
+            )
             save_file(
                 {
                     "model.layers.0.mlp.experts.gate_up_proj.weight": torch.ones((4, 8, 4), dtype=torch.float16),
@@ -555,11 +573,142 @@ class ToolTests(unittest.TestCase):
             root = Path(directory)
             left = root / "left.json"
             right = root / "right.json"
-            write_json(left, {"file_count": 1, "files": [{"name": "a", "sha256": "1", "size": 1}], "total_file_bytes": 1})
-            write_json(right, {"file_count": 1, "files": [{"name": "a", "sha256": "2", "size": 1}], "total_file_bytes": 1})
+            files = [{"name": "a", "sha256": "1", "size": 1}]
+            write_json(left, {"file_count": 1, "files": files, "total_file_bytes": 1})
+            write_json(right, {"file_count": 1, "files": [{**files[0], "sha256": "2"}], "total_file_bytes": 1})
             result = run_tool("compare_inventories.py", str(left), str(right), check=False)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("changed=['a']", result.stderr)
+
+    def test_scans_use_paths_relative_to_the_checkpoint_root(self) -> None:
+        # hf download without --local-dir lands under ~/.cache/huggingface/hub/...; the
+        # exclusion for the nested download cache must not swallow the checkpoint itself.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".cache" / "huggingface" / "hub" / "models--org--name" / "snapshots" / "abc"
+            write_checkpoint(root, {"architectures": ["DenseModel"], "model_type": "dense"}, {"w": torch.ones(2)})
+            (root / ".git" / "lfs" / "tmp").mkdir(parents=True)
+            (root / ".git" / "lfs" / "tmp" / "object.tmp").write_text("in-flight")
+            (root / ".cache" / "huggingface" / "download").mkdir(parents=True)
+            (root / ".cache" / "huggingface" / "download" / "model.safetensors.metadata").write_text("meta")
+            inventory = json.loads(run_tool("inventory.py", str(root)).stdout)
+            self.assertEqual([item["name"] for item in inventory["files"]], ["config.json", "model.safetensors"])
+            self.assertEqual(inventory["tensor_count"], 1)
+
+            (root / "model.safetensors.partial").write_text("partial")
+            failed = run_tool("inventory.py", str(root), check=False)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("incomplete files: ['model.safetensors.partial']", failed.stderr)
+
+    def test_preflight_require_decision_leaves_output_rerunnable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "src"
+            write_checkpoint(source, {"architectures": ["DenseModel"], "model_type": "dense"}, {"w": torch.ones(2)})
+            output = root / "preflight.json"
+            first = run_tool("preflight.py", str(source), "--require-decision", "--output", str(output), check=False)
+            self.assertEqual(first.returncode, 2)
+            self.assertEqual(json.loads(first.stdout)["decision"], "needs_evidence")
+            self.assertFalse(output.exists())
+            run_tool(
+                "preflight.py",
+                str(root / "src"),
+                "--modelopt-supported",
+                "yes",
+                "--whole-model-fit",
+                "yes",
+                "--require-decision",
+                "--output",
+                str(output),
+            )
+            self.assertEqual(json.loads(output.read_text())["decision"], "whole_model")
+
+    def test_preflight_counts_nextn_layer_as_mtp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_checkpoint(
+                root,
+                {
+                    "architectures": ["GlmMoeModel"],
+                    "model_type": "glm_moe",
+                    "text_config": {"num_hidden_layers": 1, "num_nextn_predict_layers": 1},
+                },
+                {
+                    "model.layers.0.mlp.up_proj.weight": torch.ones((2, 4), dtype=torch.bfloat16),
+                    "model.layers.1.eh_proj.weight": torch.ones((2, 4), dtype=torch.bfloat16),
+                    "model.layers.1.mlp.up_proj.weight": torch.ones((2, 4), dtype=torch.bfloat16),
+                },
+            )
+            report = json.loads(run_tool("preflight.py", str(root)).stdout)
+            self.assertEqual(report["hidden_layers"], 1)
+            self.assertEqual(report["mtp_layer_prefix"], "model.layers.1.")
+            self.assertEqual(report["mtp_tensor_count"], 2)
+
+    def test_audit_derives_contract_from_single_algorithm_exclusions(self) -> None:
+        # Official single-algorithm ModelOpt exports carry quant_algo + exclude_modules and no
+        # quantized_layers map; the audit must derive the quantized set from the exclusions.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            output = root / "output"
+            exclusions = ["lm_head", "model.embed_tokens", "model.layers.0.self_attn*"]
+            source_tensors = {
+                "lm_head.weight": torch.ones((4, 16), dtype=torch.bfloat16),
+                "model.embed_tokens.weight": torch.ones((4, 16), dtype=torch.bfloat16),
+                "model.layers.0.input_layernorm.weight": torch.ones(16, dtype=torch.bfloat16),
+                "model.layers.0.mlp.experts.0.up_proj.weight": torch.ones((2, 16), dtype=torch.bfloat16),
+                "model.layers.0.mlp.experts.1.up_proj.weight": torch.ones((2, 16), dtype=torch.bfloat16),
+                "model.layers.0.mlp.gate.weight": torch.ones((2, 16), dtype=torch.bfloat16),
+                "model.layers.0.self_attn.q_proj.weight": torch.ones((2, 16), dtype=torch.bfloat16),
+            }
+            write_checkpoint(source, {"architectures": ["MoeModel"], "model_type": "moe"}, source_tensors)
+            quantized = ["model.layers.0.mlp.experts.0.up_proj", "model.layers.0.mlp.experts.1.up_proj"]
+
+            def output_tensors(quantized_bases: list[str]) -> dict:
+                tensors = dict(source_tensors)
+                for base in quantized_bases:
+                    tensors[base + ".weight"] = torch.ones((2, 8), dtype=torch.uint8)
+                    tensors[base + ".weight_scale"] = torch.ones((2, 1), dtype=torch.float8_e4m3fn)
+                    tensors[base + ".weight_scale_2"] = torch.tensor(1.0)
+                    tensors[base + ".input_scale"] = torch.tensor(1.0)
+                return tensors
+
+            def write_output(quantized_bases: list[str], config_ignore: list[str]) -> None:
+                write_checkpoint(
+                    output,
+                    {
+                        "architectures": ["MoeModel"],
+                        "model_type": "moe",
+                        "quantization_config": {"ignore": config_ignore, "quant_algo": "NVFP4"},
+                    },
+                    output_tensors(quantized_bases),
+                )
+                write_json(
+                    output / "hf_quant_config.json",
+                    {"quantization": {"exclude_modules": exclusions, "group_size": 16, "quant_algo": "NVFP4"}},
+                )
+
+            write_output(quantized, exclusions)
+            report = json.loads(
+                run_tool("audit_checkpoint.py", "--source", str(source), "--output-checkpoint", str(output)).stdout
+            )
+            self.assertEqual(report["algorithm_base_counts"], {"NVFP4": 2})
+            self.assertTrue(report["quantized_layers_derived"])
+            self.assertEqual(report["precision_contract_origin"], "hf_quant_config.json")
+            self.assertEqual(report["unchanged_tensor_count"], 5)
+
+            def failed_audit() -> str:
+                result = run_tool(
+                    "audit_checkpoint.py", "--source", str(source), "--output-checkpoint", str(output), check=False
+                )
+                self.assertNotEqual(result.returncode, 0)
+                return result.stderr
+
+            write_output(quantized[:1], exclusions)
+            self.assertIn("neither excluded nor quantized", failed_audit())
+            write_output(quantized + ["model.layers.0.self_attn.q_proj"], exclusions)
+            self.assertIn("excluded module was quantized", failed_audit())
+            write_output(quantized, [])
+            self.assertIn("config.json quantization_config exclusions disagree", failed_audit())
 
 
 if __name__ == "__main__":

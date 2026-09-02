@@ -26,7 +26,9 @@ def git_commit(path: Path) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build an immutable NVFP4 conversion manifest from explicit evidence files.")
+    parser = argparse.ArgumentParser(
+        description="Build an immutable NVFP4 conversion manifest from explicit evidence files."
+    )
     parser.add_argument("--preflight", type=Path, required=True)
     parser.add_argument("--source-inventory", type=Path, required=True)
     parser.add_argument("--modelopt-root", type=Path, required=True)
