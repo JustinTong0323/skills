@@ -49,6 +49,8 @@ Confirm the runtime reads the quantization exclusions you think it reads. SGLang
 
 One Blackwell hybrid-model configuration qualified with full attention `trtllm_mha`, resolved page size 64, FP8 E4M3 KV, Mamba radix `extra_buffer`, static memory fraction 0.75, overlap/radix enabled, and decode CUDA Graph maximum batch 64. Static fractions 0.85 and 0.90 OOMed during MTP graph capture. This is model/hardware evidence, not a portable default.
 
+A GLM-MoE NVFP4 configuration (TP4 B300, `flashinfer_cutedsl` MoE, BF16 KV) qualified at static fraction 0.75 with speculative decoding disabled; 0.85 with NEXTN/MTP enabled OOMed at runtime three times under agentic concurrency. The no-MTP 0.75 shape then ran a 9-hour c32 1M-context workload with zero OOM and zero restarts. For long agentic gates, dropping speculative and lowering the static fraction was the stability variable.
+
 Budget hybrid-state memory explicitly. In GDN/Mamba-style hybrids the intermediate SSM state at FP32 consumes twice the BF16 bytes; a combination such as a BF16 LM head with FP32 SSM state can exceed consumer-GPU capacity. Check the full configuration combination against measured memory before serving.
 
 ## Deterministic Smoke
@@ -89,7 +91,9 @@ Before sending target requests, freeze:
 - Minimum stop rate and maximum truncation, request-error, and empty-output rates.
 - Harness revision/diff and output paths.
 
-Run the complete dataset through the standard harness. Verify the expected row count, exactly one complete prediction file, metrics/prediction hashes, completion-token totals, finish-reason distribution, empty outputs, and non-partial status. Missing optional `partial` metadata is not proof of a partial run when the row/file/count contract proves completeness.
+Run the complete dataset through the standard harness. Verify the expected row count, exactly one complete prediction file, metrics/prediction hashes, completion-token totals, finish-reason distribution, empty outputs, and non-partial status. Missing optional `partial` metadata is not proof of a partial run when the row/file/count contract proves completeness. With sgl-eval `--n-repeats N`, per-sample rows land in `output-rs0..rs{N-1}.jsonl` (one file per repeat round) — reading progress or accuracy from any single file misrepresents completion; aggregate all files or trust `metrics.json`.
+
+Keep eval client concurrency at or below the serving `--cuda-graph-max-bs`. A batch larger than every captured graph size decodes eagerly as a whole; on a TP4 B300 GLM-MoE this measured 75 tok/s aggregate where the same workload at 28 threads with graphs engaged did 1,486 tok/s (20x), turning a 90-minute AIME26 into a TTL-threatening one. This is an eval-protocol variable, not a model property.
 
 Accuracy alone cannot pass. Evaluators may extract a correct answer from runaway text. Apply every frozen criterion without post-hoc changes. A threshold change after results is a waiver and must not be labeled pass.
 
@@ -112,6 +116,8 @@ For reasoning models the dominant quantization cost can be thinking-token inflat
 - Thinking-length distribution: p50, tail, and length-finish rate. Mean length is polluted by runaways; per-question matched-seed pairing is the tight test.
 - One agentic long-horizon benchmark. A checkpoint can hold GSM8K/AIME-band accuracy while losing ~20pp agentic pass@1 through verbosity-driven timeouts (multiplied timeout rate, zero repetition loops); pass@k does not rescue a systematic timeout failure.
 - The explicit `max_tokens` used. Truncation fabricates regressions — an apparent 5pt AIME drop vanished when the cap rose from 32K to 131K. Scores with material length-finishes are unacceptable; raise the cap until truncation disappears or annotate the limitation honestly.
+
+Before attributing agentic length inflation to quantization, exclude harness protocol friction. On terminus-2 (JSON-only agent protocol), 76–100% of tasks showed JSON parse warnings across FP8 and both NVFP4 arms alike — a GLM-family behavior, not a quantization one. One task's 5.9x token inflation dissected to seven rounds of parse-rejection recovery plus a piecemeal rebuild, with the solve itself clean. The discriminator is per-task: matched-seed pairing shows quantization effects; harness-wide symmetric warning rates show protocol effects.
 
 ## Attribution
 
@@ -195,6 +201,8 @@ The hub xet pipeline has failed deterministically on large checkpoints; fall bac
 | Single-seed comparison flips sign across reruns | Insufficient statistical power | Paired multi-seed protocol with a predeclared margin |
 | Equal accuracy but worse agentic scores | Thinking-token inflation | Gate on thinking-length distribution, stop rate, and an agentic bench |
 | Score regression vanishes at higher `max_tokens` | Length truncation | Raise the cap until length-finishes disappear |
+| Agentic trial stuck for hours, serve returns 400s | Agent context saturation; summarization fallback looping | Mark errored (harness defect), not a model-quality signal |
+| Eval 10-20x slower than expected | Client concurrency above `cuda-graph-max-bs` forced eager decode | Cap eval threads at graph max bs |
 | Draft tools reject the checkpoint | Quantized LM head | Publish a BF16-LMHead derivative |
 | Tokenizer behavior differs from source | Regenerated legacy `tokenizer.json` | Diff non-weight files; check token ids on tricky strings |
 | Same checkpoint scores differ across GPU generations | Serving-stack or kernel defect | Run a known-good control before blaming the checkpoint |
