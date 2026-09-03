@@ -63,6 +63,15 @@ Re-resolve and record the digest when intentionally testing a newer dataset revi
 
 Search the applicable Journal store for the model, dataset digest, Harbor version, agent, exception type, prior job name, and server launch flags. Revalidate load-bearing claims against the live environment.
 
+Define the shell variables used by this and later snippets:
+
+```bash
+OPENAI_BASE=http://SERVER:30000/v1   # OpenAI-compatible base, reachable from task containers
+SERVER_ROOT=http://SERVER:30000
+MODEL=served-model-id                # must equal the ID returned by /models
+CONC=32                              # configured trial concurrency
+```
+
 For SGLang, verify:
 
 ```bash
@@ -155,7 +164,7 @@ Credentials never appear as literals in the rendered config or on the command li
 set -a; . /home/ubuntu/tb21/secrets/endpoint.env; set +a
 ```
 
-Terminus-2 needs the variable in the launcher environment regardless, because its LiteLLM client runs there. Pi reads its registry inside the container, so the renderer resolves the variable at render time into the content-addressed registry file.
+Terminus-2 needs the variable in the launcher environment regardless, because its LiteLLM client runs there. For an endpoint without auth, still export a non-empty placeholder such as `EMPTY`; an unset variable fails LiteLLM credential resolution before any request. Pi reads its registry inside the container, so the renderer resolves the variable at render time into the content-addressed registry file.
 
 For a controlled rerun, render a new job name and compare the resolved config with the prior run:
 
@@ -207,7 +216,7 @@ harbor run \
   --yes
 ```
 
-Then run the chosen harness config on the same single task, with the credential file from Phase 2 sourced into the launching shell. Package filters require the full `terminal-bench/<task>` name; `nginx-request-logging` alone is rejected before trial creation.
+Then run the chosen harness config on the same single task, with the credential file from Phase 2 sourced into the launching shell. Render it with the Phase 2 command plus `--task terminal-bench/nginx-request-logging`, a smoke-specific `--job-name`, and `--output /home/ubuntu/tb21/configs/HARNESS-smoke.json`. Package filters require the full `terminal-bench/<task>` name; `nginx-request-logging` alone is rejected before trial creation.
 
 ```bash
 harbor run --config /home/ubuntu/tb21/configs/HARNESS-smoke.json --yes
@@ -423,7 +432,7 @@ For a task-defined deadline run, rerunning only the errored or failed tasks in a
 
 Report base pass@1 and the union side by side, labelled, with the attempt count, and state which is comparable to published results. Only pass@1 is. One campaign moved from 62/89 to 75/89 over three attempts, a swing that was mostly deadline relief rather than new capability.
 
-Keep `n_concurrent_trials` and every other field identical so `compare_configs.py` shows only `job_name` and the task list as changed.
+Keep `n_concurrent_trials` and every other field identical; `compare_configs.py` ignores `job_name`, so the task list should be the only reported difference, and exit code 1 is expected.
 
 Before launching the rerun, split the errored tasks and record a prediction:
 

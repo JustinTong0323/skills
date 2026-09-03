@@ -193,7 +193,7 @@ Use `scripts/summarize_job.py` to report graded reward records, cancellations, a
 Define the target and stopping policy before launch. Poll with:
 
 ```bash
-python3 scripts/summarize_job.py JOB \
+python3 "$TB_HARBOR_SKILL_DIR/scripts/summarize_job.py" JOB \
   --target-passes TARGET \
   --fail-if-target-unreachable
 ```
@@ -207,7 +207,7 @@ Run the watchdog detached from the control-plane transport. Log the timestamped 
 Text diffs and config hashes alone do not prove equivalence. Render both resolved configs and run:
 
 ```bash
-python3 scripts/compare_configs.py PRIOR/config.json RERUN/config.json
+python3 "$TB_HARBOR_SKILL_DIR/scripts/compare_configs.py" PRIOR/config.json RERUN/config.json
 ```
 
 The command ignores top-level `job_name`, canonicalizes the set-valued retry exception lists, and reports every remaining differing JSON path. If either side contains Harbor's persisted `${VAR}`, `****`, `first4****last3`, or `[REDACTED]` form for a sensitive environment value, the command reports that path as unknown; two literal values remain strictly comparable. Verify unknown key identity separately. Any additional difference requires an explicit comparison rationale or a new experiment axis.
