@@ -7,11 +7,34 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import tempfile
 from typing import Any
 
 
 CAPABILITY_TIMEOUT_MULTIPLIER = 1_000_000_000.0
+DEFAULT_RETRY_EXCEPTIONS = (
+    "RuntimeError",
+    "NetworkConnectionError",
+    "ApiConnectionClosedError",
+    "ApiResponseStalledError",
+)
+DEFAULT_API_KEY_ENV = {
+    "terminus-2": "OPENAI_API_KEY",
+    "claude-code": "ANTHROPIC_API_KEY",
+    "pi": "OPENAI_API_KEY",
+}
+PI_THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh")
+# Harbor 0.20 derives these from the launcher's own ANTHROPIC_BASE_URL, not the
+# agent env, so an org/model ID is truncated unless every alias is set here.
+CLAUDE_MODEL_ENV = (
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+)
+ENV_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def api_bases(value: str) -> tuple[str, str]:
@@ -32,11 +55,15 @@ def retry_config(max_retries: int, exceptions: list[str]) -> dict[str, Any]:
     return {"max_retries": max_retries, "include_exceptions": exceptions}
 
 
+def api_key_template(args: argparse.Namespace) -> str:
+    return f"${{{args.api_key_env}:-EMPTY}}"
+
+
 def terminus_agent(args: argparse.Namespace, openai_base: str) -> dict[str, Any]:
     return {
         "name": "terminus-2",
         "model_name": prefixed_model("openai", args.model),
-        "env": {"OPENAI_API_KEY": args.api_key},
+        "env": {"OPENAI_API_KEY": api_key_template(args)},
         "kwargs": {
             "api_base": openai_base,
             "reasoning_effort": args.reasoning_effort,
@@ -57,19 +84,24 @@ def terminus_agent(args: argparse.Namespace, openai_base: str) -> dict[str, Any]
 
 
 def claude_agent(args: argparse.Namespace, server_root: str) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "reasoning_effort": args.reasoning_effort,
+        "max_thinking_tokens": args.max_output_tokens,
+    }
+    if args.claude_disallowed_tools is not None:
+        kwargs["disallowed_tools"] = args.claude_disallowed_tools
+    env = {
+        "ANTHROPIC_BASE_URL": server_root,
+        "ANTHROPIC_API_KEY": api_key_template(args),
+        "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(args.max_output_tokens),
+    }
+    env.update({name: args.model for name in CLAUDE_MODEL_ENV})
     return {
         "name": "claude-code",
         "model_name": args.model,
-        "kwargs": {
-            "reasoning_effort": args.reasoning_effort,
-            "max_thinking_tokens": args.max_output_tokens,
-        },
-        "env": {
-            "ANTHROPIC_BASE_URL": server_root,
-            "ANTHROPIC_API_KEY": args.api_key,
-            "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
-            "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(args.max_output_tokens),
-        },
+        "kwargs": kwargs,
+        "env": env,
     }
 
 
@@ -89,7 +121,8 @@ def pi_models(args: argparse.Namespace, openai_base: str) -> dict[str, Any]:
             args.pi_provider: {
                 "baseUrl": openai_base,
                 "api": "openai-completions",
-                "apiKey": args.api_key,
+                # Pi reads this file inside the container, so the value is literal.
+                "apiKey": os.environ.get(args.api_key_env, "EMPTY"),
                 "authHeader": True,
                 "compat": {
                     "supportsDeveloperRole": False,
@@ -193,6 +226,8 @@ def build_job(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any] 
         job["agent_timeout_multiplier"] = (
             args.agent_timeout_multiplier or CAPABILITY_TIMEOUT_MULTIPLIER
         )
+    if args.verifier_timeout_multiplier is not None:
+        job["verifier_timeout_multiplier"] = args.verifier_timeout_multiplier
     if args.agent == "pi":
         if args.pi_models_path is None:
             raise ValueError("--pi-models-path is required for the Pi harness")
@@ -318,18 +353,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--agent-setup-timeout-multiplier", type=finite_positive_float, default=3.0
     )
+    parser.add_argument("--verifier-timeout-multiplier", type=finite_positive_float)
     parser.add_argument("--max-retries", type=int, default=2)
-    parser.add_argument(
-        "--retry-exception",
-        action="append",
-        default=["RuntimeError", "NetworkConnectionError"],
-    )
-    parser.add_argument("--api-key", default="EMPTY")
+    parser.add_argument("--retry-exception", action="append")
+    parser.add_argument("--api-key-env")
+    parser.add_argument("--claude-disallowed-tools")
     parser.add_argument("--pi-provider", default="sglang")
-    parser.add_argument("--pi-thinking", default="xhigh")
+    parser.add_argument("--pi-thinking", choices=PI_THINKING_LEVELS, default="xhigh")
     parser.add_argument("--pi-models-path")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
+    if args.retry_exception is None:
+        args.retry_exception = list(DEFAULT_RETRY_EXCEPTIONS)
+    if args.api_key_env is None:
+        args.api_key_env = DEFAULT_API_KEY_ENV[args.agent]
+    if not ENV_NAME_PATTERN.fullmatch(args.api_key_env):
+        parser.error("--api-key-env must be an environment variable name")
+    if args.claude_disallowed_tools is not None:
+        if args.agent != "claude-code":
+            parser.error("--claude-disallowed-tools requires --agent claude-code")
+        try:
+            tools = shlex.split(args.claude_disallowed_tools)
+        except ValueError as error:
+            parser.error(f"--claude-disallowed-tools is not shell-parseable: {error}")
+        if not tools or "Read" in tools:
+            parser.error(
+                "--claude-disallowed-tools must scope Read, such as 'Read(**/*.pdf)'; "
+                "a bare Read removes all file reading"
+            )
     if args.max_retries < 0:
         parser.error("--max-retries must be non-negative")
     if (
@@ -339,8 +390,10 @@ def parse_args() -> argparse.Namespace:
         parser.error(
             "--agent-timeout-multiplier requires --agent-timeout-policy capability"
         )
-    if args.task and any(not task.startswith("terminal-bench/") for task in args.task):
-        parser.error("--task values must use full terminal-bench/<task> names")
+    if args.task and "/" in args.dataset:
+        org = args.dataset.split("/", 1)[0]
+        if any(not task.startswith(f"{org}/") for task in args.task):
+            parser.error(f"--task values must use full {org}/<task> names")
     return args
 
 

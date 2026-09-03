@@ -53,6 +53,7 @@ Re-resolve and record the digest when intentionally testing a newer dataset revi
 - The endpoint deployment is an identity field, not just the model name. Two slugs serving the same weights are different deployments with different speed. Record the resolved endpoint slug, URL, key identity, and smoke wall time for each run, and treat a deployment change as its own comparison axis.
 - Treat infrastructure, harness, API, agent, verifier, and model failures as different categories even when all receive reward zero.
 - Do not intervene in an active agent unless the user authorized recovery. Killing a process, injecting guidance, editing task files, or adding a timeout changes the run.
+- Own the runner and model server exclusively for the run. Record the job identity, verify who owns a process before touching it, and never kill another party's server or driver to reclaim a box; deconflict with the owner instead.
 - Do not publish a partial aggregate as a final score.
 - Before a controlled rerun, compare resolved configs structurally and prove that only approved identity fields changed.
 - Define any score cutoff before launch. Never invent or tighten a stopping rule after seeing partial outcomes.
@@ -71,9 +72,13 @@ curl -fsS -o /dev/null -w '%{http_code}\n' "$SERVER_ROOT/health"
 
 A 200 from `/models` or `/health` proves only that the control plane answers; neither performs generation. Add a generation probe and record tokens per second. Never cite health-probe latency as evidence that the endpoint is keeping up: a 0.2 s `/models` response is compatible with a run in which a quarter of all tasks exhaust their deadlines.
 
+Assert that the model ID returned by `/models` equals `--model`. A stale tunnel or port forward can still point at a previous deployment while `/health` returns 200; one campaign ran 262 trials against the wrong model that way. Repeat the check immediately before the smoke and before launch.
+
 Probe the actual reasoning and tool-call contract with a small request before Harbor. For Anthropic-compatible endpoints, exercise every effort value the selected agent version may emit, not only the configured headline value. Keep the model-specific reasoning parser, tool parser, context length, quantization, parallelism, and speculative algorithm unchanged during a harness A/B. Record the runtime image digest and the code revision reported inside the running server; a local checkout SHA does not prove what the endpoint is serving. After any runtime patch or restart, repeat the live probes and smoke against the new process.
 
 Model-specific launch recipes are part of benchmark identity. Do not substitute a different speculative algorithm, draft model, quantization path, or parser because the replacement appears functionally similar.
+
+Claude Code and stock Pi expose no temperature or top-p, so their requests use the server's defaults. For those harnesses fix sampling on the server (SGLang `--preferred-sampling-params '{"temperature": 1.0, "top_p": 0.95}'`) and confirm the effective values from request logs before launch. A run at server-default top-p 1.0 is not comparable to the official protocol.
 
 ## Phase 1: provision and preflight the Harbor runner
 
@@ -101,7 +106,7 @@ docker ps
 test -c /dev/kvm && test -r /dev/kvm && test -w /dev/kvm
 ```
 
-The last check gates the two QEMU tasks. On non-metal EC2 runners without `/dev/kvm`, `qemu-alpine-ssh` and `qemu-startup` repeatedly failed before natural grading with the same runtime error. Use a KVM-capable metal runner for a complete model score, or report those slots as deterministic runner failures.
+The last check is informational for the two QEMU tasks. `qemu-alpine-ssh` and `qemu-startup` repeatedly failed before natural grading on non-metal EC2 runners, but the official task images start QEMU without `-enable-kvm`, so KVM presence is not what the tasks exercise and requiring it would change the benchmark; what differs is CPU speed under TCG emulation. Treat both tasks as runner-environment risks, record the runner class, keep their zeros out of model-loss attribution, and prefer a metal runner for a complete score.
 
 Install a pinned Harbor version with `uv` when absent:
 
@@ -144,6 +149,14 @@ python3 "$TB_HARBOR_SKILL_DIR/scripts/render_config.py" \
 
 The renderer supports all three harnesses and writes owner-only JSON. See [harnesses.md](references/harnesses.md) for exact differences and additional flags.
 
+Credentials never appear as literals in the rendered config or on the command line. `--api-key-env VAR` (default `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY` for Claude Code) writes the Harbor template `${VAR:-EMPTY}`, which `harbor run` resolves from the launcher environment and persists as the template. Before every `harbor run`, export the variable from an owner-only file in the launching shell:
+
+```bash
+set -a; . /home/ubuntu/tb21/secrets/endpoint.env; set +a
+```
+
+Terminus-2 needs the variable in the launcher environment regardless, because its LiteLLM client runs there. Pi reads its registry inside the container, so the renderer resolves the variable at render time into the content-addressed registry file.
+
 For a controlled rerun, render a new job name and compare the resolved config with the prior run:
 
 ```bash
@@ -162,7 +175,7 @@ Timeout policy must be explicit in the report:
 - Use `--agent-timeout-policy task-defined` only when strict comparison to the task-defined deadline protocol is the objective. This omits the multiplier.
 - Use `--agent-timeout-multiplier N` with the capability policy only for an explicitly chosen finite replacement.
 - Do not use `inf` with Harbor 0.20.0. It is accepted at runtime but serialized as `null`, losing replay semantics.
-- Setup and verifier timeouts remain separate. `--agent-setup-timeout-multiplier 3` is useful for CLI installation and network variance.
+- Setup and verifier timeouts remain separate. `--agent-setup-timeout-multiplier 3` is useful for CLI installation and network variance; `--verifier-timeout-multiplier N` raises the verifier deadline when a task's tests legitimately outlast it. Record either change as a config axis.
 
 An effectively unbounded agent phase can leave a runaway reasoning turn or child-process wait occupying a slot indefinitely. Monitor progress without intervention, classify the wait, and require explicit recovery authority before stopping it. Never finalize a score around a still-running long tail.
 
@@ -171,9 +184,13 @@ Restrict retries to infrastructure exceptions unless the evaluation protocol say
 ```text
 RuntimeError
 NetworkConnectionError
+ApiConnectionClosedError
+ApiResponseStalledError
 ```
 
-Do not retry `AgentTimeoutError`, `NonZeroAgentExitCodeError`, verifier failures, or model answers silently inside the same scoring job. An `AgentTimeoutError` invalidates the capability score even when Harbor emits a zero reward; start an auditable rerun and preserve the original artifact.
+Passing `--retry-exception` replaces this list rather than extending it. The two `Api*` types are shared-transport failures such as a port forward dropping every active stream at once; without them a job loses those trials with no retry.
+
+Do not retry `AgentTimeoutError`, `NonZeroAgentExitCodeError`, verifier failures, or model answers silently inside the same scoring job. An `AgentTimeoutError` invalidates the capability score even when Harbor emits a zero reward; start an auditable rerun and preserve the original artifact. `VerifierTimeoutError`, `AgentSetupTimeoutError`, and `EnvironmentStartTimeoutError` are infrastructure outcomes that invalidate either score mode; the summary lists them under `infrastructure_exception_tasks` and they require the same auditable rerun.
 
 ## Phase 3: run two smoke gates
 
@@ -190,7 +207,7 @@ harbor run \
   --yes
 ```
 
-Then run the chosen harness config on the same single task. Package filters require the full `terminal-bench/<task>` name; `nginx-request-logging` alone is rejected before trial creation.
+Then run the chosen harness config on the same single task, with the credential file from Phase 2 sourced into the launching shell. Package filters require the full `terminal-bench/<task>` name; `nginx-request-logging` alone is rejected before trial creation.
 
 ```bash
 harbor run --config /home/ubuntu/tb21/configs/HARNESS-smoke.json --yes
@@ -200,6 +217,7 @@ The smoke must prove all of these:
 
 - endpoint reachability from the task container;
 - agent installation and model discovery;
+- the request `model` field in the trajectory equals the configured model ID, including any `org/` prefix, and matches the ID returned by `/models`;
 - reasoning and tool-call parsing;
 - at least one real tool loop;
 - trajectory and log capture;
@@ -236,10 +254,11 @@ A burst error rate is the wrong gate. A synthetic c32 burst against one endpoint
 
 ## Phase 4: start the full run detached
 
-Long control-plane or SSH commands can die with the transport. Start Harbor in a detached session on the CPU runner and write a PID, log, and exit-status file. Never use the existence of `result.json` as the done signal; Harbor writes it incrementally.
+Long control-plane or SSH commands can die with the transport. Start Harbor in a detached session on the CPU runner and write a PID, log, and exit-status file. Source the owner-only credential file into the launching shell first; the detached session inherits it. Never use the existence of `result.json` as the done signal; Harbor writes it incrementally.
 
 ```bash
-setsid bash -lc '
+setsid bash -c '
+printf "%s\n" "$$" > /home/ubuntu/tb21/RUN.pid
 harbor run --config /home/ubuntu/tb21/configs/RUN.json --yes > /home/ubuntu/tb21/RUN.log 2>&1 &
 harbor_pid=$!
 printf "%s\n" "$harbor_pid" > /home/ubuntu/tb21/RUN.harbor.pid
@@ -248,8 +267,9 @@ status=$?
 printf "%s\n" "$status" > /home/ubuntu/tb21/RUN.done
 exit "$status"
 ' </dev/null > /home/ubuntu/tb21/RUN.wrapper.log 2>&1 &
-printf '%s\n' "$!" > /home/ubuntu/tb21/RUN.pid
 ```
+
+The wrapper records its own PID from inside the session. Do not use `$!` in the launching shell: under an interactive shell `setsid` forks and exits at once, so that PID is dead before the first poll.
 
 Scale from the successful smoke. c32 was validated with a 48-vCPU runner, corrected Docker pools, and an SGLang server whose request queue stayed at zero. GPU utilization alone does not prove overload; inspect running requests, queued requests, KV/SWA pressure, response errors, and completion rate.
 
@@ -289,7 +309,7 @@ python3 "$TB_HARBOR_SKILL_DIR/scripts/summarize_job.py" \
 
 Exit 3 means the optimistic ceiling is strictly below the target. Equality remains reachable and must not stop. Run the polling loop as a separate detached watchdog on the runner, log every snapshot, and stop only the previously validated Harbor driver. Any other nonzero exit indicates a read or parsing failure and must not trigger termination.
 
-For pass@1, the optimistic ceiling is `passes + ungraded trials`. For pass@k, a task remains potentially successful until it has either passed or exhausted all configured attempts. The summary reports a partial lower-to-upper range; neither bound is a final score.
+The optimistic ceiling is the expected task count minus the tasks that exhausted every attempt without a pass and without a rerun-required exception. Ungraded tasks, timeout-bearing tasks under the capability policy, and infrastructure-exception tasks stay eligible; other exception-only tasks consume their attempts. The summary reports a partial lower-to-upper range; neither bound is a final score.
 
 When progress stops, classify before acting:
 
@@ -315,6 +335,8 @@ Declare a job complete only when authoritative evidence proves all conditions:
 - aggregate `result.json` and `config.json` hashes are recorded;
 - Pi's mounted content-addressed registry and its hash are archived when Pi is used;
 - errors and retries are enumerated by type and trial;
+- no `VerifierTimeoutError`, `AgentSetupTimeoutError`, or `EnvironmentStartTimeoutError` remains; those require rerun in either score mode;
+- every reward-0 trial without an exception has been checked against its verifier setup log; a package-index or registry failure during verifier setup is an ungraded trial, not a model loss;
 - the SGLang server remained healthy or every outage interval is accounted for.
 
 Run:
@@ -324,7 +346,7 @@ python3 "$TB_HARBOR_SKILL_DIR/scripts/summarize_job.py" /home/ubuntu/tb21/jobs/R
 sha256sum /home/ubuntu/tb21/jobs/RUN/result.json /home/ubuntu/tb21/jobs/RUN/config.json
 ```
 
-For a complete balanced k-attempt capability job without `AgentTimeoutError`, the summary reports both Avg@k and Pass@k. Avg@k is the mean reward across all task-attempt slots; Pass@k is the fraction of tasks with at least one pass. Non-timeout terminal errors remain zero-valued slots in the strict result; timeout-bearing tasks invalidate the capability score and require an auditable rerun. A task-defined run instead retains a labeled deadline score where `AgentTimeoutError` is an in-protocol terminal outcome.
+For a complete balanced k-attempt capability job without `AgentTimeoutError`, the summary reports both Avg@k and Pass@k. Avg@k is the mean reward across all task-attempt slots; Pass@k is the fraction of tasks with at least one pass. Terminal errors other than timeouts and infrastructure exceptions remain zero-valued slots in the strict result; timeout-bearing tasks invalidate the capability score, infrastructure-exception tasks invalidate either score, and both require an auditable rerun. A task-defined run instead retains a labeled deadline score where `AgentTimeoutError` is an in-protocol terminal outcome.
 
 A watchdog notification, a background-task completion event, or a `wait` that returns is not a completion signal either. Before auditing, re-read the direct signals: a non-null `finished_at`, the recorded driver exit status file, and the absence of the driver PID. Only those count. An audit begun on an indirect signal has to be retracted when the direct ones disagree.
 
@@ -361,6 +383,7 @@ Report:
 - error and retry counts by category;
 - paired both-pass, both-fail, left-only, right-only, and exception-bearing tasks;
 - harness, protocol, reasoning, sampling, timeout, and server differences;
+- for a text-only endpoint, which vision-dependent tasks were structurally unwinnable, whether a scoped tool deny was configured, and that the score is a capability exclusion relative to a vision-capable reference;
 - infrastructure incidents and whether they affected scoring.
 
 An official-score gap is not a model regression until harness and protocol differences are controlled. A published run may use a private harness, different prompt profile, sampling policy, tool protocol, or timeout behavior. When that setup is unavailable, report the local run as a different harness evaluation rather than a strict reproduction.
@@ -385,13 +408,13 @@ Distinguish:
 - Avg@k: mean reward across k attempts per task; for a complete balanced job this equals the per-trial mean;
 - pass@16 union: fraction of tasks with at least one success among 16 attempts.
 
-Validate Harbor's Avg@k and pass-at-k output independently with `summarize_job.py`. It groups trial IDs by the task prefix before the final `__<trial-suffix>`. A partial or cancelled 1,424-trial job has neither a final Avg@16 nor a final Pass@16, even if some tasks already succeeded.
+Validate Harbor's Avg@k and pass-at-k output independently with `summarize_job.py`. It groups trial IDs by the task prefix before the final `__<trial-suffix>`. Harbor truncates that prefix to 32 characters, so the summary warns when any grouped name reaches 32 characters or the trial count is not tasks × attempts; TB2.1's longest task name is exactly 32 characters, so no merge occurs there today. A partial or cancelled 1,424-trial job has neither a final Avg@16 nor a final Pass@16, even if some tasks already succeeded.
 
 Do not automatically merge Avg@k across a base job and top-up jobs. A valid effective ledger must record the original task-attempt slot, the exclusion reason, the replacement job and trial, the frozen config axes, and a predeclared first-k selection order. Wrong-endpoint attempts, timeout replacements, and later retries cannot be distinguished safely from aggregate files alone. Keep the strict base score and label any lineage-backed replacement score as adjusted.
 
 ## Phase 8b: exception reruns and union scores
 
-The default capability-first policy should not produce `AgentTimeoutError`. If one appears, first verify that the resolved `config.json` contains `agent_timeout_multiplier: 1000000000.0`; a missing multiplier means the wrong policy ran. Treat every task listed under `agent_timeout_tasks` as requiring rerun even when Harbor also emitted a zero reward. Do not count that zero as model evidence, and do not declare the capability score final while any such task remains.
+The default capability-first policy should not produce `AgentTimeoutError`. If one appears, first verify that the resolved `config.json` contains `agent_timeout_multiplier: 1000000000.0`; a missing multiplier means the wrong policy ran. Treat every task listed under `rerun_tasks` as requiring rerun even when Harbor also emitted a zero reward; that list holds timeout-bearing tasks under the capability policy plus `VerifierTimeoutError`, `AgentSetupTimeoutError`, and `EnvironmentStartTimeoutError` tasks under either policy. Do not count those zeros as model evidence, and do not declare the score final while any such task remains.
 
 For a task-defined deadline run, rerunning only the errored or failed tasks in a new job is legitimate, and its union with the base run is sound arithmetic. A task that already passed cannot un-pass, so the union equals what a full rerun would have produced; retrying only failures is not cherry-picking for a union metric. Two constraints hold anyway:
 

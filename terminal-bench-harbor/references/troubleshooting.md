@@ -42,11 +42,11 @@ Terminus-2's LiteLLM calls run in the Harbor launcher process. Values under the 
 
 ## QEMU tasks fail before natural grading
 
-`qemu-alpine-ssh` and `qemu-startup` require hardware virtualization. On non-metal EC2 runners without a usable `/dev/kvm`, both tasks repeatedly produced the same runtime failure across independent campaigns. Check the device before launch and use a KVM-capable metal runner. Do not fold deterministic runner-ineligible zeros into a model-capability score.
+On non-metal EC2 runners, `qemu-alpine-ssh` and `qemu-startup` repeatedly produced the same runtime failure across independent campaigns. The official task images start QEMU without `-enable-kvm`, so the tasks run under TCG emulation regardless and requiring KVM would change the benchmark; a metal runner helps through CPU speed, not virtualization. Record the runner class, treat both tasks as runner-environment risks, and do not fold their zeros into a model-capability score.
 
 ## `AgentTimeoutError`
 
-This is Harbor's outer deadline for the agent phase, derived from the task timeout and multiplier. It does not mean SGLang timed out.
+This is Harbor's outer deadline for the agent phase: each task's own base timeout (900, 1800, or 3600 s in TB2.1) multiplied by `agent_timeout_multiplier`. It is a per-task limit, not one fixed cap, and it does not mean SGLang timed out.
 
 The renderer's capability policy writes `agent_timeout_multiplier=1000000000`, so a new capability-first job should not reach this exception in practice. Confirm the resolved config before rerunning. Task-defined deadline jobs may produce it legitimately, but the result measures time-to-solution under that deadline rather than capability alone.
 
@@ -63,6 +63,7 @@ Read the result as:
 - stop reason never `max_tokens` means the output cap is not the constraint. The model is stopping naturally to call tools and simply reasoning at length per turn.
 - model time dominant means generation, not tooling. Combined with the per-stream throughput measurement from the contention preflight, this separates "the endpoint is slow" from "this harness generates far more tokens per task".
 - input tokens far above the other arm mean the harness replays a larger context per turn and pays more prefill.
+- a zero-byte patch with a healthy stream means the deadline landed between the agent's last edit and its `git commit`, or the container had no git identity; the work was done and never collected. Check the patch-collection boundary before blaming flags or transport.
 
 One measured campaign: across 8 timed-out trials, 9,222 s of wall span split into 7,619 s model time (82.6 percent), 1,578 s tool time, and 26 s overhead, over 1,164 model calls averaging 6.5 s. Stop reason was a tool call on every turn and never the output cap. Timed-out trials emitted roughly 132k output tokens each against about 15.7k for an average trial, with single turns peaking above 38k tokens. The first explanation offered, that the harness ran many slow tools, was wrong and the measurement refuted it.
 
@@ -94,7 +95,19 @@ Do not kill, add a timeout, edit files, or inject guidance when the requested po
 
 ## `inf` becomes `null`
 
-Harbor 0.20.0 accepts an infinite timeout, but its JSON serialization writes `null` into `config.json` and `lock.json`. That loses the intended replay contract. Use a large finite multiplier and hash the resolved config.
+Harbor 0.20.0 accepts an infinite timeout, but its JSON serialization writes `null` into `config.json` and `lock.json`. That loses the intended replay contract. Use a large finite multiplier and hash the resolved config. `summarize_job.py` refuses a `null` multiplier because the timeout policy cannot be recovered from it.
+
+## `VerifierTimeoutError`, `AgentSetupTimeoutError`, `EnvironmentStartTimeoutError`
+
+The agent phase ended normally and Harbor's verifier, agent-setup, or environment-start deadline fired instead. These are infrastructure outcomes: `summarize_job.py` lists them under `infrastructure_exception_tasks`, marks the score invalid in either mode, and Harbor's default retry policy excludes `VerifierTimeoutError`. Rerun the affected tasks in a new job; raise `--verifier-timeout-multiplier` or `--agent-setup-timeout-multiplier` only as an explicitly recorded config change.
+
+## Several trials disconnect in the same millisecond
+
+Identical `ApiConnectionClosedError` or `ApiResponseStalledError` timestamps across trials while the server stays healthy point at a shared transport such as one port forward, not at the tasks. The renderer's default retry list includes both types; a job retrying only `RuntimeError` and `NetworkConnectionError` loses every such trial with no retry. Classify by trajectory start time against the transport event, do not restart a live forward mid-run, and drain old connections before routing new ones elsewhere.
+
+## Reward 0 with no exception but the verifier never judged
+
+A package-index or registry failure during verifier setup, such as a PyPI 502, can leave reward 0 with no exception. Check the verifier setup log for every reward-0 trial before counting it as a model loss; such trials are ungraded and belong in a rerun.
 
 ## Harbor omits `n_attempts` or concurrency from `config.json`
 
@@ -110,7 +123,7 @@ Look for:
 Input tag 'document' ... does not match any of the expected tags
 ```
 
-This is an Anthropic API compatibility failure. It is not model reasoning failure, verifier failure, or agent timeout. Keep the stock result unchanged and test server support separately.
+This is an Anthropic API compatibility failure. It is not model reasoning failure, verifier failure, or agent timeout. The rejected block stays in the conversation, so every later request in the session fails as well; count the whole trial as a protocol failure. Keep the stock result unchanged, and for a text-only endpoint configure the scoped `--claude-disallowed-tools` deny described in [harnesses.md](harnesses.md) as a separately labelled run.
 
 ## Claude Code effort passes smoke but fails later
 

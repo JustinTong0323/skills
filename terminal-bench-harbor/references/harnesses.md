@@ -23,7 +23,7 @@ Use the OpenAI `/v1` base. The renderer produces the equivalent of:
   "name": "terminus-2",
   "model_name": "openai/MODEL_ID",
   "env": {
-    "OPENAI_API_KEY": "EMPTY"
+    "OPENAI_API_KEY": "${OPENAI_API_KEY:-EMPTY}"
   },
   "kwargs": {
     "api_base": "http://SERVER:30000/v1",
@@ -46,7 +46,7 @@ Use the OpenAI `/v1` base. The renderer produces the equivalent of:
 
 Replace model limits with the served model's actual values. Terminus-2 is the closest of these stock Harbor agents to a controlled temperature/top-p experiment. The renderer requires a finite non-negative temperature and `0 < top_p <= 1`.
 
-Terminus-2 performs model requests in the Harbor launcher process through LiteLLM. The agent config `env` reaches container-side execs but does not supply credentials to that host-side client. For an authenticated endpoint, load `OPENAI_API_KEY` into the launcher environment from an owner-only file before `harbor run`; do not rely on `agents[].env.OPENAI_API_KEY` or put the key literal in shell history. One complete campaign's first smoke failed before any model request until the launcher environment was corrected.
+Terminus-2 performs model requests in the Harbor launcher process through LiteLLM. The agent config `env` reaches container-side execs but does not supply credentials to that host-side client, so the rendered `${OPENAI_API_KEY:-EMPTY}` template only records which variable the run used. Export `OPENAI_API_KEY` in the launcher environment from an owner-only file before `harbor run` (`set -a; . FILE; set +a`); a literal `EMPTY` in the agent env does not satisfy LiteLLM credential resolution. The renderer takes `--api-key-env VAR`, never a key value, so nothing enters shell history. One complete campaign's first smoke failed before any model request until the launcher environment was corrected.
 
 ## Claude Code
 
@@ -62,14 +62,29 @@ Use the Anthropic server root, not the OpenAI `/v1` base:
   },
   "env": {
     "ANTHROPIC_BASE_URL": "http://SERVER:30000",
-    "ANTHROPIC_API_KEY": "EMPTY",
+    "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY:-EMPTY}",
     "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
-    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "393216"
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "393216",
+    "ANTHROPIC_MODEL": "MODEL_ID",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "MODEL_ID",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "MODEL_ID",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "MODEL_ID",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "MODEL_ID"
   }
 }
 ```
 
-Claude Code owns its sampling behavior and may cap effective context or output below the environment values. `CLAUDE_CODE_ATTRIBUTION_HEADER=0` avoids changing otherwise stable conversation prefixes and is required for comparable prefix-cache behavior. Record the CLI version and effective limits from the trajectory. Its `Read` tool can emit Anthropic `document` blocks for PDFs; the server must support those blocks or the run can fail with HTTP 400.
+The five model variables are explicit because Harbor 0.20.0 derives `ANTHROPIC_MODEL` and the alias variables from the launcher's own `ANTHROPIC_BASE_URL`, not from the agent `env`, and merges the agent `env` afterwards. Without them an `org/model` ID reaches the server as `model` and the alias variables stay unset. Confirm the request `model` field in the smoke trajectory.
+
+Claude Code owns its sampling behavior and may cap effective context or output below the environment values. `CLAUDE_CODE_ATTRIBUTION_HEADER=0` avoids changing otherwise stable conversation prefixes and is required for comparable prefix-cache behavior. Record the CLI version and effective limits from the trajectory.
+
+Its `Read` tool replays PNG, JPG, and PDF files as Anthropic `image_url` and `document` blocks. Against a text-only endpoint the next `/v1/messages` request fails with HTTP 400 and the block stays in the conversation, so every later request in that session fails too; one run lost 63 of 67 `UnknownApiError` trials this way. For such endpoints pass a scoped deny with `--claude-disallowed-tools`. Harbor inserts the value unquoted into the agent's shell command, so the value carries its own quoting:
+
+```text
+--claude-disallowed-tools "'Read(**/*.pdf)' 'Read(**/*.png)' 'Read(**/*.jpg)'"
+```
+
+The renderer rejects a bare `Read`, which would remove all file reading. Confirm in the smoke trajectory that the deny applies and that text files still read, record the deny list as a harness-config axis, and label the resulting score as a capability exclusion relative to a vision-capable reference.
 
 Do not assume `reasoning_effort=max` produces only `max` requests. Agent versions can emit related values such as `high` during the same run. Probe every value observed in a smoke against the live Anthropic endpoint, inspect server logs for template or validation errors, and repeat the probe at intended concurrency before a large run.
 
@@ -88,7 +103,7 @@ The Harbor Pi adapter does not generate a custom provider registry. The renderer
 }
 ```
 
-The renderer writes a provider with `api: openai-completions`, the OpenAI `/v1` base, a reasoning-effort mapping, context and output limits, zero local cost, and reasoning replay support. `--pi-models-path` is a base filename: the mounted source adds a semantic SHA-256 that excludes the credential value, and the same identity cannot be overwritten with different content. Keep it distinct from `--output`. The job config records the semantic digest; archive the resolved source file named in the mount and verify its exact file hash. Use:
+The renderer writes a provider with `api: openai-completions`, the OpenAI `/v1` base, a reasoning-effort mapping, context and output limits, zero local cost, and reasoning replay support. Pi reads this file inside the container, so the renderer resolves `--api-key-env` at render time and writes the literal key into the registry; the semantic digest excludes it. `--pi-thinking` accepts `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`. `--pi-models-path` is a base filename: the mounted source adds a semantic SHA-256 that excludes the credential value, and the same identity cannot be overwritten with different content. Keep it distinct from `--output`. The job config records the semantic digest; archive the resolved source file named in the mount and verify its exact file hash. Use:
 
 ```text
 --agent pi
@@ -122,6 +137,8 @@ Pin what each harness can actually control:
 - Terminus-2: reasoning effort, temperature, top-p, maximum tokens.
 - Claude Code: reasoning effort and nominal thinking/output limits; no matched temperature/top-p knobs.
 - Pi: thinking-level mapping; no stock Harbor temperature/top-p knobs.
+
+For Claude Code and stock Pi, fix sampling on the server (SGLang `--preferred-sampling-params '{"temperature": 1.0, "top_p": 0.95}'`) and verify the effective values from request logs before launch; otherwise requests use server defaults such as top-p 1.0 and the run is not comparable to the official protocol.
 
 Do not claim that two runs isolate the agent harness if the API protocol, sampling, context limit, timeout policy, or server launch also changed.
 

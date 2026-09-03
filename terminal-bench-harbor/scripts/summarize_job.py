@@ -36,19 +36,26 @@ def print_human(summary: dict) -> None:
             f"{eval_summary['expected_trials']}; "
             f"ungraded: {eval_summary['ungraded_trials']}"
         )
-        if eval_summary["requires_rerun"]:
-            print(
+        if eval_summary["agent_timeout_tasks"]:
+            timeout_label = (
                 "AgentTimeoutError tasks require rerun: "
-                + ", ".join(eval_summary["agent_timeout_tasks"])
+                if eval_summary["score_mode"] == "capability"
+                else "AgentTimeoutError task-defined deadline outcomes: "
             )
-        elif eval_summary["agent_timeout_tasks"]:
+            print(timeout_label + ", ".join(eval_summary["agent_timeout_tasks"]))
+        if eval_summary["infrastructure_exception_tasks"]:
             print(
-                "AgentTimeoutError task-defined deadline outcomes: "
-                + ", ".join(eval_summary["agent_timeout_tasks"])
+                "Infrastructure exception tasks require rerun: "
+                + ", ".join(eval_summary["infrastructure_exception_tasks"])
+            )
+        if eval_summary["task_name_merge_risk"]:
+            print(
+                "Warning: Harbor truncates task names to 32 characters in trial IDs; "
+                "grouped task counts may have merged tasks"
             )
         score_label = f"Final {eval_summary['score_mode']} score"
         if eval_summary["requires_rerun"]:
-            print(f"{score_label}: unavailable; AgentTimeoutError rerun required")
+            print(f"{score_label}: unavailable; exception rerun required")
         elif not eval_summary["score_valid"]:
             print(f"{score_label}: unavailable; job incomplete")
         avg_at_attempts = eval_summary["avg_at_attempts"]
@@ -107,7 +114,7 @@ def main() -> None:
         parser.error("--fail-if-target-unreachable requires --target-passes")
     try:
         summary = summarize(args.job, target_passes=args.target_passes)
-    except ValueError as error:
+    except (OSError, ValueError) as error:
         parser.error(str(error))
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))

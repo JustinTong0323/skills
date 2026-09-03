@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -204,22 +205,6 @@ class HarborResultsTests(unittest.TestCase):
         self.assertFalse(value["score_valid"])
         self.assertFalse(value["requires_rerun"])
 
-    def test_retryable_error_consumes_aggregated_target_slot(self) -> None:
-        value = summarize_eval(
-            "eval",
-            {
-                "reward_stats": {"reward": {"1.0": ["task-a__one"]}},
-                "exception_stats": {"RuntimeError": ["task-b__one"]},
-            },
-            expected_tasks=2,
-            attempts=1,
-            complete=False,
-            target_passes=2,
-        )
-        self.assertEqual(value["exhausted_failed_tasks"], 1)
-        self.assertEqual(value["optimistic_successful_tasks"], 1)
-        self.assertFalse(value["target_reachable"])
-
     def test_exception_only_task_is_retained(self) -> None:
         outcomes = task_outcomes(
             {
@@ -337,6 +322,83 @@ class HarborResultsTests(unittest.TestCase):
         self.assertEqual(value["exhausted_failed_tasks"], 1)
         self.assertEqual(value["optimistic_successful_tasks"], 0)
         self.assertFalse(value["target_reachable"])
+
+    def test_infrastructure_exception_invalidates_either_score_mode(self) -> None:
+        for capability_mode in (True, False):
+            with self.subTest(capability_mode=capability_mode):
+                value = summarize_eval(
+                    "eval",
+                    {
+                        "reward_stats": {"reward": {"1.0": ["task-a__one"]}},
+                        "exception_stats": {"VerifierTimeoutError": ["task-b__one"]},
+                    },
+                    expected_tasks=2,
+                    attempts=1,
+                    complete=True,
+                    target_passes=2,
+                    capability_mode=capability_mode,
+                )
+                self.assertEqual(value["infrastructure_exception_tasks"], ["task-b"])
+                self.assertEqual(value["rerun_tasks"], ["task-b"])
+                self.assertTrue(value["requires_rerun"])
+                self.assertFalse(value["score_valid"])
+                self.assertIsNone(value["pass_at_attempts"])
+                self.assertEqual(value["exhausted_failed_tasks"], 0)
+                self.assertEqual(value["optimistic_successful_tasks"], 2)
+                self.assertTrue(value["target_reachable"])
+
+    def test_null_timeout_multiplier_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job = Path(directory)
+            (job / "result.json").write_text(json.dumps(self.result()))
+            (job / "config.json").write_text(
+                json.dumps({"job_name": "test", "agent_timeout_multiplier": None})
+            )
+            with self.assertRaisesRegex(ValueError, "agent_timeout_multiplier null"):
+                summarize(job)
+
+    def test_is_complete_requires_integer_trial_counts(self) -> None:
+        self.assertFalse(is_complete({"finished_at": "2026-08-01T01:00:00"}))
+        self.assertFalse(
+            is_complete(
+                {
+                    "finished_at": "2026-08-01T01:00:00",
+                    "n_total_trials": 4,
+                    "stats": {"n_completed_trials": "4"},
+                }
+            )
+        )
+        self.assertTrue(is_complete(self.result()))
+
+    def test_long_task_name_flags_merge_risk(self) -> None:
+        long_name = "x" * 32
+        value = summarize_eval(
+            "eval",
+            {"reward_stats": {"reward": {"1.0": [f"{long_name}__one"]}}},
+            expected_tasks=1,
+            attempts=1,
+            complete=True,
+            target_passes=None,
+        )
+        self.assertTrue(value["task_name_merge_risk"])
+        merged = summarize_eval(
+            "eval",
+            {"reward_stats": {"reward": {"1.0": ["task-a__one", "task-a__two"]}}},
+            expected_tasks=1,
+            attempts=1,
+            complete=True,
+            target_passes=None,
+        )
+        self.assertTrue(merged["task_name_merge_risk"])
+        clean = summarize_eval(
+            "eval",
+            {"reward_stats": {"reward": {"1.0": ["task-a__one"]}}},
+            expected_tasks=1,
+            attempts=1,
+            complete=True,
+            target_passes=None,
+        )
+        self.assertFalse(clean["task_name_merge_risk"])
 
     def test_met_target_is_reachable_without_expected_task_count(self) -> None:
         value = summarize_eval(
@@ -555,6 +617,21 @@ class HarborResultsTests(unittest.TestCase):
         self.assertIn("job incomplete", process.stdout)
         self.assertNotIn("rerun required", process.stdout)
 
+    def test_summary_cli_reports_missing_result_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS / "summarize_job.py"),
+                    str(Path(directory) / "missing"),
+                ],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(process.returncode, 2)
+        self.assertIn("No such file", process.stderr)
+        self.assertNotIn("Traceback", process.stderr)
+
     def test_compare_configs_cli(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -609,6 +686,13 @@ class HarborResultsTests(unittest.TestCase):
 
 
 class RenderConfigTests(unittest.TestCase):
+    def setUp(self) -> None:
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("OPENAI_API_KEY", None)
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+
     def renderer_command(self, agent: str, directory: Path) -> list[str]:
         output = directory / "job.json"
         models = directory / "models.json"
@@ -656,8 +740,66 @@ class RenderConfigTests(unittest.TestCase):
             job["agents"][0]["kwargs"]["api_base"], "http://server:30000/v1"
         )
         self.assertEqual(job["agents"][0]["model_name"], "openai/org/model")
-        self.assertEqual(job["agents"][0]["env"]["OPENAI_API_KEY"], "EMPTY")
+        self.assertEqual(
+            job["agents"][0]["env"]["OPENAI_API_KEY"], "${OPENAI_API_KEY:-EMPTY}"
+        )
         self.assertEqual(job["agent_timeout_multiplier"], 1_000_000_000.0)
+        self.assertEqual(
+            job["retry"]["include_exceptions"],
+            [
+                "RuntimeError",
+                "NetworkConnectionError",
+                "ApiConnectionClosedError",
+                "ApiResponseStalledError",
+            ],
+        )
+
+    def test_retry_exception_replaces_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            command = self.renderer_command("terminus-2", Path(directory))
+            command.extend(("--retry-exception", "OnlyThis"))
+            subprocess.run(command, check=True)
+            job = json.loads((Path(directory) / "job.json").read_text())
+        self.assertEqual(job["retry"]["include_exceptions"], ["OnlyThis"])
+
+    def test_api_key_env_renders_template_and_rejects_bad_names(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            command = self.renderer_command("terminus-2", Path(directory))
+            subprocess.run([*command, "--api-key-env", "MY_KEY"], check=True)
+            job = json.loads((Path(directory) / "job.json").read_text())
+            process = subprocess.run(
+                [*command, "--api-key-env", "bad:name"],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(job["agents"][0]["env"]["OPENAI_API_KEY"], "${MY_KEY:-EMPTY}")
+        self.assertNotEqual(process.returncode, 0)
+
+    def test_verifier_timeout_multiplier_passthrough(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            command = self.renderer_command("terminus-2", Path(directory))
+            subprocess.run(command, check=True)
+            default = json.loads((Path(directory) / "job.json").read_text())
+            command.extend(("--verifier-timeout-multiplier", "2.5"))
+            subprocess.run(command, check=True)
+            job = json.loads((Path(directory) / "job.json").read_text())
+        self.assertNotIn("verifier_timeout_multiplier", default)
+        self.assertEqual(job["verifier_timeout_multiplier"], 2.5)
+
+    def test_task_prefix_follows_dataset_org(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            command = self.renderer_command("terminus-2", Path(directory))
+            command.extend(("--dataset", "other/dataset", "--task", "other/foo"))
+            subprocess.run(command, check=True)
+            job = json.loads((Path(directory) / "job.json").read_text())
+            process = subprocess.run(
+                [*command, "--task", "terminal-bench/foo"],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(job["datasets"][0]["task_names"], ["other/foo"])
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn("other/<task>", process.stderr)
 
     def test_task_defined_timeout_policy_omits_multiplier(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -707,6 +849,48 @@ class RenderConfigTests(unittest.TestCase):
             job["agents"][0]["env"]["ANTHROPIC_BASE_URL"], "http://server:30000"
         )
         self.assertEqual(job["agents"][0]["env"]["CLAUDE_CODE_ATTRIBUTION_HEADER"], "0")
+        self.assertEqual(
+            job["agents"][0]["env"]["ANTHROPIC_API_KEY"], "${ANTHROPIC_API_KEY:-EMPTY}"
+        )
+
+    def test_claude_sets_model_and_alias_env(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job, _ = self.run_renderer("claude-code", Path(directory))
+        env = job["agents"][0]["env"]
+        for name in (
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "CLAUDE_CODE_SUBAGENT_MODEL",
+        ):
+            self.assertEqual(env[name], "org/model", name)
+        self.assertNotIn("disallowed_tools", job["agents"][0]["kwargs"])
+
+    def test_claude_disallowed_tools_must_be_scoped(self) -> None:
+        scoped = "'Read(**/*.pdf)' 'Read(**/*.png)'"
+        with tempfile.TemporaryDirectory() as directory:
+            command = self.renderer_command("claude-code", Path(directory))
+            subprocess.run([*command, "--claude-disallowed-tools", scoped], check=True)
+            job = json.loads((Path(directory) / "job.json").read_text())
+            bare = subprocess.run(
+                [*command, "--claude-disallowed-tools", "Read"],
+                capture_output=True,
+                text=True,
+            )
+            wrong_agent = subprocess.run(
+                [
+                    *self.renderer_command("terminus-2", Path(directory)),
+                    "--claude-disallowed-tools",
+                    scoped,
+                ],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(job["agents"][0]["kwargs"]["disallowed_tools"], scoped)
+        self.assertNotEqual(bare.returncode, 0)
+        self.assertIn("bare Read", bare.stderr)
+        self.assertNotEqual(wrong_agent.returncode, 0)
 
     def test_pi_writes_models_and_mount(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -717,6 +901,7 @@ class RenderConfigTests(unittest.TestCase):
             self.assertTrue(source.exists())
         self.assertIsNotNone(models)
         self.assertEqual(models["providers"]["sglang"]["api"], "openai-completions")
+        self.assertEqual(models["providers"]["sglang"]["apiKey"], "EMPTY")
         self.assertIn(".sha256-", source.name)
         self.assertEqual(
             job["agents"][0]["env"]["TB_PI_MODELS_SEMANTIC_SHA256"],
@@ -756,12 +941,30 @@ class RenderConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             command = self.renderer_command("pi", root)
-            subprocess.run([*command, "--api-key", "first"], check=True)
-            process = subprocess.run(
-                [*command, "--api-key", "second"], capture_output=True, text=True
+            subprocess.run(
+                command, check=True, env={**os.environ, "OPENAI_API_KEY": "first"}
             )
+            job = json.loads((root / "job.json").read_text())
+            models = json.loads(
+                Path(job["environment"]["mounts"][0]["source"]).read_text()
+            )
+            process = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "OPENAI_API_KEY": "second"},
+            )
+        self.assertEqual(models["providers"]["sglang"]["apiKey"], "first")
         self.assertNotEqual(process.returncode, 0)
         self.assertIn("already exists with different content", process.stderr)
+
+    def test_pi_thinking_rejects_unknown_level(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            command = self.renderer_command("pi", Path(directory))
+            process = subprocess.run(
+                [*command, "--pi-thinking", "max"], capture_output=True, text=True
+            )
+        self.assertNotEqual(process.returncode, 0)
 
     def test_immutable_json_publish_failure_leaves_no_partial_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

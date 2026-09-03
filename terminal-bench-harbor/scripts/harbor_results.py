@@ -7,6 +7,10 @@ from typing import Any
 
 HARBOR_JOB_DEFAULTS = {"n_attempts": 1, "n_concurrent_trials": 4}
 SENSITIVE_ENV_MARKERS = ("key", "secret", "token", "password", "credential", "auth")
+INFRASTRUCTURE_EXCEPTIONS = frozenset(
+    {"AgentSetupTimeoutError", "EnvironmentStartTimeoutError", "VerifierTimeoutError"}
+)
+TRIAL_TASK_NAME_LIMIT = 32
 
 
 def load_job(path: str | Path) -> tuple[dict[str, Any], dict[str, Any], Path]:
@@ -24,9 +28,13 @@ def load_job(path: str | Path) -> tuple[dict[str, Any], dict[str, Any], Path]:
 
 def is_complete(result: dict[str, Any]) -> bool:
     stats = result.get("stats", {})
+    completed = stats.get("n_completed_trials")
+    total = result.get("n_total_trials")
     return (
         result.get("finished_at") is not None
-        and stats.get("n_completed_trials") == result.get("n_total_trials")
+        and isinstance(completed, int)
+        and isinstance(total, int)
+        and completed == total
         and stats.get("n_running_trials", 0) == 0
         and stats.get("n_pending_trials", 0) == 0
         and stats.get("n_cancelled_trials", 0) == 0
@@ -265,6 +273,14 @@ def summarize_eval(
         for task, outcome in outcomes.items()
         if "AgentTimeoutError" in outcome["exception_types"]
     )
+    infrastructure_tasks = sorted(
+        task
+        for task, outcome in outcomes.items()
+        if INFRASTRUCTURE_EXCEPTIONS.intersection(outcome["exception_types"])
+    )
+    rerun_tasks = set(infrastructure_tasks)
+    if capability_mode:
+        rerun_tasks.update(agent_timeout_tasks)
     passed_trials = sum(is_passing_reward(reward) for _, reward in pairs)
     failed_trials = sum(not is_passing_reward(reward) for _, reward in pairs)
     success_key = "non_timeout_passed" if capability_mode else "passed"
@@ -273,10 +289,7 @@ def summarize_eval(
     lower_bound = successful_tasks / expected_tasks if expected_tasks else None
     exhausted_failures = sum(
         not outcomes.get(task, {}).get(success_key, False)
-        and not (
-            capability_mode
-            and "AgentTimeoutError" in outcomes.get(task, {}).get("exception_types", [])
-        )
+        and task not in rerun_tasks
         and count >= attempts
         for task, count in attempt_counts.items()
     )
@@ -289,7 +302,12 @@ def summarize_eval(
         else None
     )
     expected_trials = expected_tasks * attempts if expected_tasks is not None else None
-    score_valid = complete and (not capability_mode or not agent_timeout_tasks)
+    score_valid = complete and not rerun_tasks
+    task_name_merge_risk = complete and (
+        any(len(task) >= TRIAL_TASK_NAME_LIMIT for task in outcomes)
+        or sum(entry["attempts"] for entry in outcomes.values())
+        != len(outcomes) * attempts
+    )
     avg_at_attempts = (
         sum(reward for _, reward in pairs) / expected_trials
         if score_valid and expected_trials
@@ -334,9 +352,12 @@ def summarize_eval(
         "exception_stats": eval_result.get("exception_stats", {}),
         "exception_tasks": exception_tasks,
         "agent_timeout_tasks": agent_timeout_tasks,
+        "infrastructure_exception_tasks": infrastructure_tasks,
+        "rerun_tasks": sorted(rerun_tasks),
+        "task_name_merge_risk": task_name_merge_risk,
         "score_mode": "capability" if capability_mode else "task-defined deadline",
         "score_valid": score_valid,
-        "requires_rerun": capability_mode and bool(agent_timeout_tasks),
+        "requires_rerun": bool(rerun_tasks),
     }
 
 
@@ -366,6 +387,14 @@ def summarize(path: str | Path, target_passes: int | None = None) -> dict[str, A
     incomplete_expected_tasks = (
         expected_task_count(result, attempts, 1) if len(evals) == 1 else None
     )
+    if (
+        "agent_timeout_multiplier" in config
+        and config["agent_timeout_multiplier"] is None
+    ):
+        raise ValueError(
+            "config.json has agent_timeout_multiplier null (Harbor serialized an "
+            "infinite multiplier); the timeout policy cannot be recovered"
+        )
     capability_mode = config.get("agent_timeout_multiplier") is not None
     return {
         "path": str(result_path),
