@@ -138,7 +138,7 @@ Pin what each harness can actually control:
 - Claude Code: reasoning effort and nominal thinking/output limits; no matched temperature/top-p knobs.
 - Pi: thinking-level mapping; no stock Harbor temperature/top-p knobs.
 
-For Claude Code and stock Pi, fix sampling on the server (SGLang `--preferred-sampling-params '{"temperature": 1.0, "top_p": 0.95}'`) and verify the effective values from request logs before launch; otherwise requests use server defaults such as top-p 1.0 and the run is not comparable to the official protocol.
+For Claude Code and stock Pi the effective sampling is SGLang's chat default: the served model's `generation_config.json` under `--sampling-defaults model`, else temperature 1.0 and top-p 1.0. `--preferred-sampling-params` is overridden for chat and Anthropic requests because the OpenAI-compatible layer fills omitted fields first, so do not rely on it. Verify the startup line `Using default chat sampling params from model generation config` and the request logs before launch, and treat any `generation_config.json` change as part of the server recipe.
 
 Do not claim that two runs isolate the agent harness if the API protocol, sampling, context limit, timeout policy, or server launch also changed.
 

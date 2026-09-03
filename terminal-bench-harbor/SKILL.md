@@ -78,7 +78,7 @@ Probe the actual reasoning and tool-call contract with a small request before Ha
 
 Model-specific launch recipes are part of benchmark identity. Do not substitute a different speculative algorithm, draft model, quantization path, or parser because the replacement appears functionally similar.
 
-Claude Code and stock Pi expose no temperature or top-p, so their requests use the server's defaults. For those harnesses fix sampling on the server (SGLang `--preferred-sampling-params '{"temperature": 1.0, "top_p": 0.95}'`) and confirm the effective values from request logs before launch. A run at server-default top-p 1.0 is not comparable to the official protocol.
+Claude Code and stock Pi expose no temperature or top-p, so their requests use the server's chat defaults. On SGLang those come from the served model's `generation_config.json` under `--sampling-defaults model` (the default), else temperature 1.0 and top-p 1.0. `--preferred-sampling-params` does not apply here: the OpenAI-compatible layer fills every omitted sampling field before the server merges preferred values, so chat and Anthropic requests always override them. Before launch, read the startup line `Using default chat sampling params from model generation config` and confirm the effective values in request logs; if the shipped `generation_config.json` lacks the intended `temperature` and `top_p`, serve from a local copy with those fields set and record it as a server-recipe axis. A run at server-default top-p 1.0 is not comparable to the official protocol.
 
 ## Phase 1: provision and preflight the Harbor runner
 
