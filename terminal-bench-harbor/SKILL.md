@@ -72,6 +72,8 @@ MODEL=served-model-id                # must equal the ID returned by /models
 CONC=32                              # configured trial concurrency
 ```
 
+If the endpoint requires auth, add `-H "authorization: Bearer $OPENAI_API_KEY"` to every probe below after sourcing the credential file; never paste a key literal into the command line.
+
 For SGLang, verify:
 
 ```bash
@@ -164,7 +166,7 @@ Credentials never appear as literals in the rendered config or on the command li
 set -a; . /home/ubuntu/tb21/secrets/endpoint.env; set +a
 ```
 
-Terminus-2 needs the variable in the launcher environment regardless, because its LiteLLM client runs there. For an endpoint without auth, still export a non-empty placeholder such as `EMPTY`; an unset variable fails LiteLLM credential resolution before any request. Pi reads its registry inside the container, so the renderer resolves the variable at render time into the content-addressed registry file.
+Terminus-2 needs the variable in the launcher environment regardless, because its LiteLLM client runs there; that client reads only `OPENAI_API_KEY`, so the renderer rejects other `--api-key-env` names for Terminus-2. For an endpoint without auth, still export a non-empty placeholder such as `EMPTY`; an unset variable fails LiteLLM credential resolution before any request. Pi reads its registry inside the container, so the renderer resolves the variable at render time into the content-addressed registry file; source the credential file before both `render_config.py` and `harbor run`, or the immutable registry bakes in `EMPTY` and only fails at the smoke.
 
 For a controlled rerun, render a new job name and compare the resolved config with the prior run:
 

@@ -369,6 +369,11 @@ def parse_args() -> argparse.Namespace:
         args.api_key_env = DEFAULT_API_KEY_ENV[args.agent]
     if not ENV_NAME_PATTERN.fullmatch(args.api_key_env):
         parser.error("--api-key-env must be an environment variable name")
+    if args.agent == "terminus-2" and args.api_key_env != "OPENAI_API_KEY":
+        parser.error(
+            "terminus-2 reads OPENAI_API_KEY in the Harbor launcher process; "
+            "--api-key-env cannot rename it"
+        )
     if args.claude_disallowed_tools is not None:
         if args.agent != "claude-code":
             parser.error("--claude-disallowed-tools requires --agent claude-code")

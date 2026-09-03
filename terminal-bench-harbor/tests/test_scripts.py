@@ -764,7 +764,7 @@ class RenderConfigTests(unittest.TestCase):
 
     def test_api_key_env_renders_template_and_rejects_bad_names(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            command = self.renderer_command("terminus-2", Path(directory))
+            command = self.renderer_command("claude-code", Path(directory))
             subprocess.run([*command, "--api-key-env", "MY_KEY"], check=True)
             job = json.loads((Path(directory) / "job.json").read_text())
             process = subprocess.run(
@@ -772,8 +772,21 @@ class RenderConfigTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-        self.assertEqual(job["agents"][0]["env"]["OPENAI_API_KEY"], "${MY_KEY:-EMPTY}")
+        self.assertEqual(
+            job["agents"][0]["env"]["ANTHROPIC_API_KEY"], "${MY_KEY:-EMPTY}"
+        )
         self.assertNotEqual(process.returncode, 0)
+
+    def test_terminus_rejects_custom_api_key_env(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            command = self.renderer_command("terminus-2", Path(directory))
+            process = subprocess.run(
+                [*command, "--api-key-env", "MY_KEY"],
+                capture_output=True,
+                text=True,
+            )
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn("OPENAI_API_KEY", process.stderr)
 
     def test_verifier_timeout_multiplier_passthrough(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

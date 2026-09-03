@@ -442,5 +442,7 @@ def select_eval(result: dict[str, Any], key: str | None) -> tuple[str, dict[str,
             raise ValueError(f"eval key not found: {key}")
         return key, evals[key]
     if len(evals) != 1:
-        raise ValueError("result contains multiple evals; pass --eval-key")
+        raise ValueError(
+            "result contains multiple evals; pass --left-eval-key/--right-eval-key"
+        )
     return next(iter(evals.items()))
